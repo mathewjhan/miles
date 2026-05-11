@@ -175,8 +175,8 @@ def _deregister_adapter(name: str, config: AdapterConfig, rollout_id: int, args,
 
     log_prefix = f"[multilora] ({name})"
 
-    step_counts = ray.get(get_multi_lora_controller().adapter_step_counts.remote())
-    step = step_counts[name]
+    train_steps = ray.get(get_multi_lora_controller().adapter_train_steps.remote())
+    step = train_steps[name]
 
     # Save the checkpoint
     save_multi_lora_checkpoints(args, model, step, {name: config})

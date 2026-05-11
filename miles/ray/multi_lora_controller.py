@@ -137,7 +137,7 @@ class MultiLoRAController:
         # the samples corresponding to adapter_name
         self.drain_until_rollout_id: dict[str, int] = {}
         # Map from adapter name to step number, seeded when they are loaded
-        self.step_counts: dict[str, int] = {}
+        self.train_steps: dict[str, int] = {}
 
     def register_adapter(self, adapter_dir: str) -> dict:
         config = parse_adapter_yaml(Path(adapter_dir) / "adapter.yaml")
@@ -166,7 +166,7 @@ class MultiLoRAController:
               return max(steps) if steps else 0
 
         ckpt_root = config.dir / "checkpoints"
-        self.step_counts[config.name] = get_checkpoint_step(ckpt_root)
+        self.train_steps[config.name] = get_checkpoint_step(ckpt_root)
 
         logger.info(f"Registered adapter '{config.name}' at slot {slot} (PENDING)")
         return {"name": config.name, "slot": slot}
@@ -233,8 +233,8 @@ class MultiLoRAController:
 
         # Increment the step count upon training completion, regardless of if trained on
         # TODO: possibly track which samples were trained on
-        for name in self.step_counts.keys():
-            self.step_counts[name] += 1
+        for name in self.train_steps.keys():
+            self.train_steps[name] += 1
 
     def mark_removed(self, name: str) -> int:
         """Finalize removal: drop from registry and free the slot. Called by
@@ -244,7 +244,7 @@ class MultiLoRAController:
             return -1
         slot = self.configs[name].slot
         del self.configs[name]
-        del self.step_counts[name]
+        del self.train_steps[name]
         self.drain_until_rollout_id.pop(name, None)
         self.free_slots.add(slot)
         logger.info(f"Removed adapter '{name}' (slot {slot} freed)")
@@ -253,5 +253,5 @@ class MultiLoRAController:
     def adapter_configs(self) -> dict[str, AdapterConfig]:
         return dict(self.configs)
 
-    def adapter_step_counts(self) -> dict[str, int]:
-        return dict(self.step_counts)
+    def adapter_train_steps(self) -> dict[str, int]:
+        return dict(self.train_steps)
