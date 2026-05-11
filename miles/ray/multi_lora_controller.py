@@ -233,7 +233,7 @@ class MultiLoRAController:
 
         # Increment the step count upon training completion, regardless of if trained on
         # TODO: possibly track which samples were trained on
-        for name, _ in self.step_counts:
+        for name in self.step_counts.keys():
             self.step_counts[name] += 1
 
     def mark_removed(self, name: str) -> int:
