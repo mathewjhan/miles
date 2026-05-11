@@ -130,13 +130,14 @@ class MultiLoRAController:
 
         #### Used for dynamic register/deregister lora adapters
         # Last rollout id that started generating
-        self.last_started_rollout_id: int = -1
         # Last rollout id that was trained
         self.last_trained_rollout_id: int = -1
         # Map from adapter name -> rollout id
         # Any samples in rollout id after map[adapter_name] does not contain
         # the samples corresponding to adapter_name
         self.drain_until_rollout_id: dict[str, int] = {}
+        # Map from adapter name to step number, seeded when they are loaded
+        self.step_counts: dict[str, int] = {}
 
     def register_adapter(self, adapter_dir: str) -> dict:
         config = parse_adapter_yaml(Path(adapter_dir) / "adapter.yaml")
@@ -153,6 +154,19 @@ class MultiLoRAController:
         self.configs[config.name] = dataclasses.replace(
             config, slot=slot, state=AdapterState.PENDING
         )
+
+        def get_checkpoint_step(ckpt_dir: Path) -> int:
+              if not ckpt_dir.exists():
+                  return 0
+              steps = [
+                  int(d.name.split("_")[1])
+                  for d in ckpt_dir.iterdir()
+                  if d.is_dir() and d.name.startswith("step_")
+              ]
+              return max(steps) if steps else 0
+
+        ckpt_root = config.dir / "checkpoints"
+        self.step_counts[config.name] = get_checkpoint_step(ckpt_root)
 
         logger.info(f"Registered adapter '{config.name}' at slot {slot} (PENDING)")
         return {"name": config.name, "slot": slot}
@@ -202,6 +216,7 @@ class MultiLoRAController:
 
     # Update the latest rollout generation id completed
     def report_training_completed(self, rollout_id: int) -> None:
+        # Monotonically increase the rollout id
         self.last_trained_rollout_id = max(rollout_id, self.last_trained_rollout_id)
 
         # For all DRAINING adapters, update their status to DRAINED
@@ -216,6 +231,11 @@ class MultiLoRAController:
                 self.update_adapter_state(name, AdapterState.DRAINED)
                 logger.info(f"Adapter '{name}' DRAINED")
 
+        # Increment the step count upon training completion, regardless of if trained on
+        # TODO: possibly track which samples were trained on
+        for name, _ in self.step_counts:
+            self.step_counts[name] += 1
+
     def mark_removed(self, name: str) -> int:
         """Finalize removal: drop from registry and free the slot. Called by
         the orchestration layer once cross-system cleanup is done. Idempotent
@@ -224,6 +244,7 @@ class MultiLoRAController:
             return -1
         slot = self.configs[name].slot
         del self.configs[name]
+        del self.step_counts[name]
         self.drain_until_rollout_id.pop(name, None)
         self.free_slots.add(slot)
         logger.info(f"Removed adapter '{name}' (slot {slot} freed)")
@@ -232,5 +253,5 @@ class MultiLoRAController:
     def adapter_configs(self) -> dict[str, AdapterConfig]:
         return dict(self.configs)
 
-    def get_last_started_rollout_id(self) -> int:
-        return self.last_started_rollout_id
+    def adapter_step_counts(self) -> dict[str, int]:
+        return dict(self.step_counts)

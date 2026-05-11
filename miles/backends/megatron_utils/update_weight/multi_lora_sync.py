@@ -175,8 +175,11 @@ def _deregister_adapter(name: str, config: AdapterConfig, rollout_id: int, args,
 
     log_prefix = f"[multilora] ({name})"
 
+    step_counts = ray.get(get_multi_lora_controller().adapter_step_counts.remote())
+    step = step_counts[name]
+
     # Save the checkpoint
-    save_multi_lora_checkpoints(args, model, rollout_id, {name: config})
+    save_multi_lora_checkpoints(args, model, step, {name: config})
     logger.info(f"{log_prefix} saved final checkpoint")
 
     # Clear out the multilora slot in the multilora layer in the Megatron model
