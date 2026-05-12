@@ -35,7 +35,7 @@ def slice_lora_to_rank(hf_name: str, tensor: torch.Tensor, adapter_rank: int) ->
 def save_multi_lora_checkpoints(
     args,
     model,
-    iteration: int,
+    adapter_steps: Mapping[str, int],
     adapter_configs: Mapping[str, AdapterConfig],
 ):
     """Save per-adapter checkpoints in two formats per adapter.
@@ -70,6 +70,7 @@ def save_multi_lora_checkpoints(
 
     for adapter_name, config in adapter_configs.items():
         log_prefix = f"[multilora] ({adapter_name})"
+        iteration = adapter_steps[adapter_name]
 
         final_dir = config.dir / "checkpoints" / f"step_{iteration}"
         tmp_dir = config.dir / "checkpoints" / f"_tmp_step_{iteration}"
@@ -179,7 +180,7 @@ def _deregister_adapter(name: str, config: AdapterConfig, rollout_id: int, args,
     step = train_steps[name]
 
     # Save the checkpoint
-    save_multi_lora_checkpoints(args, model, step, {name: config})
+    save_multi_lora_checkpoints(args, model, {name: step}, {name: config})
     logger.info(f"{log_prefix} saved final checkpoint")
 
     # Clear out the multilora slot in the multilora layer in the Megatron model

@@ -542,8 +542,10 @@ class MegatronTrainRayActor(TrainRayActor):
 
             from .update_weight.multi_lora_sync import save_multi_lora_checkpoints
 
-            adapter_configs = ray.get(get_multi_lora_controller().adapter_configs.remote())
-            save_multi_lora_checkpoints(self.args, self.model, rollout_id, adapter_configs)
+            controller = get_multi_lora_controller()
+            adapter_configs = ray.get(controller.adapter_configs.remote())
+            adapter_steps = ray.get(controller.adapter_train_steps.remote())
+            save_multi_lora_checkpoints(self.args, self.model, adapter_steps, adapter_configs)
         else:
             save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)
 
