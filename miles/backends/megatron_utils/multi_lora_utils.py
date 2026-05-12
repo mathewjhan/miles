@@ -152,7 +152,6 @@ def initialize_multi_lora_model_and_optimizer(
     check_model_hashes(args, model, iteration)
     opt_param_scheduler.step(increment=iteration * args.global_batch_size)
 
-    from miles.backends.megatron_utils.multi_lora import load_pending_adapters
     load_pending_adapters(args, model, optimizer)
 
     return model, optimizer, opt_param_scheduler, iteration
