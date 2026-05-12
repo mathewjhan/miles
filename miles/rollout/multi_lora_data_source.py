@@ -1,13 +1,11 @@
-"""Multi-LoRA data source: round-robins ``get_samples`` across ACTIVE
-adapters only. Reaching ``num_epoch`` triggers ``deregister_adapter``;
-the trainer's lifecycle gate drives the rest of the state machine.
-"""
-
+import os
 import copy
 import logging
+from collections import deque
 from argparse import Namespace
 
 import ray
+import torch
 
 from miles.ray.multi_lora_controller import get_multi_lora_controller
 from miles.rollout.data_source import DataSource, RolloutDataSource
@@ -24,12 +22,40 @@ class MultiLoRADataSource(DataSource):
         self.sources: dict[str, RolloutDataSource] = {}
         self.configs: dict[str, AdapterConfig] = {}
         self.epoch_counts: dict[str, int] = {}
+
+        self.source_queue = deque()
         self._reconcile(self._fetch_configs())
 
     def _fetch_configs(self) -> dict[str, AdapterConfig]:
         return ray.get(self.controller.adapter_configs.remote())
 
+    def _fetch_adapter_steps(self) -> dict[str, int]:
+        return ray.get(self.controller.adapter_train_steps.remote())
+
+    def _update_source_queue(self, active_names):
+        active_names = set(active_names)
+
+        # Filter out any adapter names that are gone while retaining order
+        new_source_queue = deque()
+
+        # Keep old entries in order and add into new queue
+        in_queue = set()
+        while self.source_queue:
+            if (name := self.source_queue.popleft()) in active_names:
+                new_source_queue.append(name)
+                in_queue.add(name)
+
+        # Add new entries to the end
+        for name in active_names:
+            if name not in in_queue:
+                new_source_queue.append(name)
+
+        assert set(new_source_queue) == active_names and len(new_source_queue) == len(active_names)
+
+        self.source_queue = new_source_queue
+
     def _reconcile(self, configs: dict[str, AdapterConfig]) -> None:
+        # Clean up old sources
         for name in list(self.sources):
             if name not in configs:
                 del self.sources[name]
@@ -37,6 +63,7 @@ class MultiLoRADataSource(DataSource):
                 del self.epoch_counts[name]
                 logger.info(f"Removed data source for adapter '{name}'")
 
+        # Create new sources
         for name, config in configs.items():
             if name not in self.sources:
                 self.sources[name] = self._create_adapter_source(config)
@@ -45,11 +72,20 @@ class MultiLoRADataSource(DataSource):
             self.configs[name] = config
 
     def _create_adapter_source(self, config: AdapterConfig) -> RolloutDataSource:
+        steps = self._fetch_adapter_steps()
         adapter_args = copy.copy(self.args)
+
+        # Data
         adapter_args.prompt_data = config.data
         adapter_args.input_key = config.input_key or self.args.input_key
         adapter_args.label_key = config.label_key or self.args.label_key
         adapter_args.metadata_key = config.metadata_key or self.args.metadata_key
+
+        # Checkpointing
+        adapter_args.save = config.dir or self.args.save
+        adapter_args.load = config.dir or self.args.load
+        adapter_args.start_rollout_id = steps.get(config.name, 0)
+
         return RolloutDataSource(adapter_args)
 
     def get_samples(self, num_samples: int) -> list[list[Sample]]:
@@ -64,8 +100,7 @@ class MultiLoRADataSource(DataSource):
         # Run one last iter for those being drained, since sglang rollout needs to be able to run one last
         # time for the adapter after the draining has kicked off in order to update the adapter states
         active_names += datasource_drained
-        per_adapter = num_samples // len(active_names)
-        remainder = num_samples % len(active_names)
+        self._update_source_queue(active_names)
 
         refs = {name: AdapterRef(name=name, slot=configs[name].slot) for name in active_names}
         reward_specs = {
@@ -75,17 +110,13 @@ class MultiLoRADataSource(DataSource):
 
         # Get samples from each data source
         all_samples: list[list[Sample]] = []
-        for i, name in enumerate(active_names):
-            # TODO: remove early source bias from this
-            count = per_adapter + (1 if i < remainder else 0)
-            if count == 0:
-                continue
+        for i in range(num_samples):
+            name = self.source_queue.popleft()
+            config = configs[name]
+            self.source_queue.append(name)
 
             source: RolloutDataSource = self.sources[name]
-            config = configs[name]
-            prev_epoch = source.epoch_id
-
-            adapter_samples = source.get_samples(count)
+            adapter_samples = source.get_samples(1)
 
             # Begin deregistration process when out of data
             # sample_group_index is the same as tracking the row index
@@ -126,9 +157,19 @@ class MultiLoRADataSource(DataSource):
             self.sources[name].add_samples([group])
 
     def save(self, rollout_id):
-        for source in self.sources.values():
-            source.save(rollout_id)
+        # Note: the rollout_id is unused for multilora in favor
+        # of the actual last train step that was tracked for that lora
+        steps = self._fetch_adapter_steps()
+
+        for adapter_name, source in self.sources.items():
+            step = steps.get(adapter_name, 0)
+            source.save(step)
 
     def load(self, rollout_id=None):
-        for source in self.sources.values():
-            source.load(rollout_id)
+        # Note: the rollout_id is unused for multilora in favor
+        # of the actual last step that was tracked
+        steps = self._fetch_adapter_steps()
+
+        for adapter_name, source in self.sources.items():
+            step = steps.get(adapter_name, 0)
+            source.load(step)
