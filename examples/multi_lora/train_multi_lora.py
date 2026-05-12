@@ -1,21 +1,6 @@
-"""Example multi-LoRA training script.
-
-Trains two LoRA adapters (gsm8k + dapo_math) simultaneously on the same base model.
-Each adapter has its own dataset, reward function, and checkpoint directory.
-
-Usage:
-    ray start --head --num-gpus 8
-    ray job submit -- python examples/multi_lora/train_multi_lora.py \
-        --actor-num-nodes 1 --actor-num-gpus-per-node 8 --colocate \
-        --hf-checkpoint Qwen/Qwen2.5-0.5B-Instruct \
-        --lora-rank 32 --target-modules all-linear \
-        --multi-lora-dir examples/multi_lora/adapters \
-        --multi-lora-n-adapters 4 \
-        --rollout-batch-size 32 --global-batch-size 256 \
-        --num-rollout 100
-"""
-
 import asyncio
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import ray
@@ -24,73 +9,35 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_
 
 from miles.ray.multi_lora_controller import create_multi_lora_controller
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
-from miles.utils.adapter_config import AdapterState
+from miles.utils.adapter_config import AdapterState, ADAPTER_INACTIVE_STATES, ADAPTER_ROLLOUT_STATES
 from miles.utils.arguments import parse_args
 from miles.utils.logging_utils import configure_logger
 from miles.utils.misc import should_run_periodic_action
 from miles.utils.tracking_utils import init_tracking
 
+logger = logging.getLogger(__name__)
 
-async def train(args):
-    configure_logger()
-    pgs = create_placement_groups(args)
-    init_tracking(args)
-
-    # Create the named multi-LoRA controller and register adapters before
-    # any consumer (rollout manager, train workers) tries to look it up.
-    controller = create_multi_lora_controller(args.multi_lora_n_adapters, args.lora_rank)
-    for adapter_dir in sorted(Path(args.multi_lora_dir).iterdir()):
-        if (adapter_dir / "adapter.yaml").exists():
-            ray.get(controller.register_adapter.remote(str(adapter_dir)))
-
-    args.data_source_path = "miles.rollout.multi_lora_data_source.MultiLoRADataSource"
-
-    rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
-    actor_model, critic_model = await create_training_models(args, pgs, rollout_manager)
-
-    # Adapters that exist at startup are already installed by
-    # initialize_multi_lora_model_and_optimizer (before the actor's backuper
-    # snapshots), so the initial update_weights() below pushes them to SGLang
-    # in one shot. Mid-run additions are picked up by load_pending_adapters
-    # inside the loop.
+async def run_trainer(args, controller, rollout_manager, actor_model, num_rollout_per_epoch, shared_state: list[int]) -> None:
     if args.offload_rollout:
         await rollout_manager.onload_weights.remote()
 
+    # sync starting weights to sglang
     await actor_model.update_weights()
+
+    if args.check_weight_update_equal:
+        await rollout_manager.check_weights.remote(action="compare")
 
     if args.offload_rollout:
         await rollout_manager.onload_kv.remote()
 
-    rollout_id = args.start_rollout_id
-    while rollout_id < args.num_rollout:
-        # Online additions: install model-side, then re-sync to SGLang so the
-        # new adapter is reachable by this cycle's generate. SGLang is already
-        # loaded at this point (idle phases don't offload it, productive
-        # cycles end with onload_kv) so update_weights pushes directly —
-        # calling onload_weights here would resume already-resumed memory
-        # and crash the SGLang HTTP server.
-        n_installed = await actor_model.load_pending_adapters()
-        if n_installed > 0:
-            await actor_model.update_weights()
+    async def offload_train():
+        if args.offload_train:
+            await actor_model.offload()
+        else:
+            await actor_model.clear_memory()
 
-        # Idle gate: nothing to do if no ACTIVE adapter. Don't advance rollout_id.
-        # Still drain any DRAINED adapters from a prior cycle so their slots
-        # can be reused by a future register.
-        configs = await controller.adapter_configs.remote()
-        if AdapterState.ACTIVE not in {c.state for c in configs.values()}:
-            if any(c.state == AdapterState.DRAINED for c in configs.values()):
-                await actor_model.update_weights()
-                await actor_model.unload_drained_adapters(rollout_id)
-            await asyncio.sleep(args.multi_lora_idle_poll_s)
-            continue
-
-        await controller.report_generation_started.remote(rollout_id)
-
-        if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
-            await rollout_manager.eval.remote(rollout_id)
-
-        rollout_data_ref = await rollout_manager.generate.remote(rollout_id)
-
+    async def offload_rollout():
+        # Offload if need to train or if need to update adapters
         if args.offload_rollout:
             offload_tags = [GPU_MEMORY_TYPE_CUDA_GRAPH]
             if "kv_cache" in args.offload_rollout_level:
@@ -99,37 +46,93 @@ async def train(args):
                 offload_tags.append(GPU_MEMORY_TYPE_WEIGHTS)
             await rollout_manager.offload.remote(tags=offload_tags)
 
-        await actor_model.train(rollout_id, rollout_data_ref)
+    async def save(rollout_id):
+        await actor_model.save_model(
+            rollout_id,
+            force_sync=rollout_id == args.num_rollout - 1,
+        )
+        if args.rollout_global_dataset:
+            await rollout_manager.save.remote(rollout_id)
 
-        if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
-            await actor_model.save_model(rollout_id)
+    rollout_id = args.start_rollout_id
 
-        if args.offload_train:
-            await actor_model.offload()
+    # Note: in colocated, rollout is inherently tied to train (1 rollout means 1 train) --
+    # In async, we should have a run_rollout to gate the rollout.
+    def should_run_train(adapter_configs):
+        return any(config.state in ADAPTER_ROLLOUT_STATES for config in adapter_configs.values())
+
+    def should_update_adapters(adapter_configs):
+        return any(config.state in ADAPTER_INACTIVE_STATES for config in adapter_configs.values())
+
+    # TODO: improve loop readability
+    while True:
+        adapter_configs = await controller.adapter_configs.remote()
+        run_train = should_run_train(adapter_configs)
+        update_adapters = should_update_adapters(adapter_configs)
+
+        # Run training
+        if run_train:
+            rollout_data_ref = await rollout_manager.generate.remote(rollout_id)
+            await offload_rollout()
+
+            await actor_model.train(rollout_id, rollout_data_ref)
+            await controller.report_training_completed.remote(rollout_id)
+
+        # Load/unload adapteres
+        if update_adapters:
+            # Train already offloads the rollout
+            if not run_train:
+                await offload_rollout()
+                await actor_model.onload()
+
+            n_loaded = await actor_model.load_pending_adapters()
+            n_unloaded = await actor_model.unload_drained_adapters(rollout_id)
+
+        # Both cases need to push weights
+        if run_train or update_adapters:
+            # For run train, at the end, update rollout id and checkpoint if needed
+            if run_train:
+                if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
+                    await save(rollout_id)
+                rollout_id += 1
+                shared_state[0] = rollout_id
+
+            # Push the weights to sglang
+            await offload_train()
+            if args.offload_rollout:
+                await rollout_manager.onload_weights.remote()
+            await actor_model.update_weights()
+            if args.offload_rollout:
+                await rollout_manager.onload_kv.remote()
         else:
-            await actor_model.clear_memory()
-
-        # update_weights pushes ACTIVE adapters AND unloads DRAINED ones from
-        # SGLang inside its existing pause/flush bracket — must run before the
-        # model-side cleanup below so SGLang releases the slot first.
-        if args.offload_rollout:
-            await rollout_manager.onload_weights.remote()
-        await actor_model.update_weights()
-        if args.offload_rollout:
-            await rollout_manager.onload_kv.remote()
-
-        # DRAINED -> REMOVED: model-side cleanup (save final ckpt, clear slot,
-        # zero optimizer, mark REMOVED so the slot can be reused).
-        await actor_model.unload_drained_adapters(rollout_id)
-
-        if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
-            await rollout_manager.eval.remote(rollout_id)
-
-        rollout_id += 1
+            print("Nothing to do: sleeping for 5s")
+            await asyncio.sleep(5)
 
     await rollout_manager.dispose.remote()
 
 
+async def main(args):
+    configure_logger()
+    pgs = create_placement_groups(args)
+    init_tracking(args)
+
+    # No startup registration ‚Äî the schedule task drives all events.
+    controller = create_multi_lora_controller(args.multi_lora_n_adapters, args.lora_rank)
+    args.data_source_path = "miles.rollout.multi_lora_data_source.MultiLoRADataSource"
+    args.custom_generate_state_path = "miles.ray.multi_lora_controller.MultiLoRAGenerateState"
+
+    rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
+    actor_model, _ = await create_training_models(args, pgs, rollout_manager)
+
+    shared_state = [args.start_rollout_id]
+
+    await asyncio.gather(
+        run_trainer(args, controller, rollout_manager, actor_model, num_rollout_per_epoch, shared_state),
+        run_schedule(controller, Path(args.multi_lora_dir), shared_state),
+    )
+
+
 if __name__ == "__main__":
     args = parse_args()
-    asyncio.run(train(args))
+    asyncio.run(main(args))
+
