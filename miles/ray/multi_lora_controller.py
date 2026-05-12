@@ -1,13 +1,3 @@
-"""Multi-LoRA controller: singleton Ray actor owning the adapter registry
-and lifecycle state machine. Knows nothing about Megatron / SGLang / datasets.
-
-State machine: PENDING -> ACTIVE -> DRAINING -> DRAINED -> REMOVED.
-The driver triggers register/deregister; the trainer triggers mark_active
-(after install) and mark_removed (after cleanup). The trainer reports rollout
-progress via report_generation_started / report_training_completed; those
-advance the watermarks that move adapters DRAINING -> DRAINED.
-"""
-
 import dataclasses
 import logging
 from pathlib import Path

@@ -156,6 +156,9 @@ class MultiLoRADataSource(DataSource):
                 continue
             self.sources[name].add_samples([group])
 
+    # TODO: support save/loading per adapter
+    # Saving and loading both currently don't work for a single adapter,
+    # so this functionality doesn't directly work right now
     def save(self, rollout_id):
         # Note: the rollout_id is unused for multilora in favor
         # of the actual last train step that was tracked for that lora
@@ -166,8 +169,6 @@ class MultiLoRADataSource(DataSource):
             source.save(step)
 
     def load(self, rollout_id=None):
-        # Note: the rollout_id is unused for multilora in favor
-        # of the actual last step that was tracked
         steps = self._fetch_adapter_steps()
 
         for adapter_name, source in self.sources.items():
