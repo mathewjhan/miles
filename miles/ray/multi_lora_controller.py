@@ -112,11 +112,11 @@ class MultiLoRAGenerateState(GenerateState):
         # Cleanup
         for adapter_name in inflight_drained:
             res = self.in_flight_group_count.pop(adapter_name, None)
-            if not res:
+            if res is None:
                 logger.warn(f"{adapter_name} was removed from in_flight without any in-flight samples, this indicates that either adapter was removed before generating any samples or an underlying inflight counting error")
         for adapter_name in to_mark:
             res = self.trainable_group_count.pop(adapter_name, None)
-            if not res:
+            if res is None:
                 logger.warn(f"{adapter_name} was removed from trainable group count without any in-flight samples, this indicates that either adapter was removed before generating any samples or an underlying trainable group counting error")
 
 
