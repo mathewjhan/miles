@@ -343,8 +343,6 @@ def _register_adapter(name: str, config: AdapterConfig, model) -> None:
     """
     from megatron.bridge.peft.multi_lora_layers import init_adapter_slot, load_adapter
 
-    from ..multi_lora import find_latest_checkpoint
-
     log_prefix = f"[multilora] ({name})"
 
     ckpt_root = config.dir / "checkpoints"
@@ -368,8 +366,6 @@ def _deregister_adapter(name: str, config: AdapterConfig, rollout_id: int, args,
     """Model-side cleanup for one DRAINED adapter.
     """
     from megatron.bridge.peft.multi_lora_layers import clear_adapter_slot
-
-    from ..multi_lora import zero_optimizer_state_for_adapter
 
     log_prefix = f"[multilora] ({name})"
 
