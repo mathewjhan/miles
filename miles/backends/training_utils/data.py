@@ -142,8 +142,7 @@ def get_batch(
 
         if allgather_cp:
             assert batch.get("adapter_slots") is None, (
-                "allgather CP is not supported with multi-LoRA: "
-                "global chunking breaks per-adapter token boundaries"
+                "allgather CP is currently not supported with multi-LoRA: "
             )
             # DSA mode: concatenate all sequences first, then slice once with CP.
             # We also pad the *global* concatenated stream to make per-rank chunks equal.
@@ -192,8 +191,7 @@ def get_batch(
         raise ValueError(f"Unsupported qkv_format: {qkv_format}")
 
     # Multi-LoRA: compute per-adapter token counts from post-CP per-sample lengths.
-    # NOTE: allgather CP is not supported — it chunks the global stream across CP ranks
-    # without respecting sample boundaries, which breaks MultiLoRA's adapter routing.
+    # NOTE: allgather CP is currently not supported
     adapter_slots = batch.get("adapter_slots")
     if adapter_slots is not None:
         assert all(adapter_slots[i] <= adapter_slots[i+1] for i in range(len(adapter_slots)-1)), (

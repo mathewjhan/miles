@@ -28,11 +28,6 @@ async def remote_rm(args, sample: Sample):
 
 
 def _resolve_reward_config(args, sample: Sample) -> tuple[str | None, str]:
-    """Return (custom_rm_path, rm_type) for a sample.
-
-    Per-sample ``reward_spec`` (set by data sources that need per-sample reward
-    dispatch, e.g. multi-LoRA) takes precedence over global args.
-    """
     if sample.reward_spec is not None:
         return sample.reward_spec.custom_rm_path, (sample.reward_spec.rm_type or "").strip()
     return getattr(args, "custom_rm_path", None), (getattr(args, "rm_type", None) or "").strip()
