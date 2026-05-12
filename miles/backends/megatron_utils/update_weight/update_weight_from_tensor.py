@@ -330,7 +330,7 @@ class UpdateWeightFromTensor:
         ``lora_loaded=True`` on subsequent per-cycle refreshes."""
         from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
 
-        from .multi_lora_sync import slice_lora_to_rank
+        from miles.backends.megatron_utils.multi_lora import slice_lora_to_rank
 
         adapter_rank = config.rank
         lora_config = build_lora_sync_config(self.args)

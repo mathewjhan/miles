@@ -490,7 +490,8 @@ class MegatronTrainRayActor(TrainRayActor):
         # if self.args.offload_train:
         #     self.wake_up()
 
-        from .update_weight.multi_lora_sync import load_pending_adapters
+        from miles.backends.megatron_utils.multi_lora import load_pending_adapters
+
         n = load_pending_adapters(self.args, self.model, self.optimizer)
         if n > 0:
             # Re-snapshot: init_adapter_slot + load_adapter mutated the model,
@@ -514,7 +515,8 @@ class MegatronTrainRayActor(TrainRayActor):
             return 0
         # if self.args.offload_train:
         #     self.wake_up()
-        from .update_weight.multi_lora_sync import unload_drained_adapters
+
+        from miles.backends.megatron_utils.multi_lora import unload_drained_adapters
         n = unload_drained_adapters(self.args, self.model, self.optimizer, rollout_id)
         if n > 0:
             self.weights_backuper.backup("actor")
@@ -540,7 +542,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if is_multi_lora_enabled(self.args):
             from miles.ray.multi_lora_controller import get_multi_lora_controller
 
-            from .update_weight.multi_lora_sync import save_multi_lora_checkpoints
+            from miles.backends.megatron_utils.multi_lora import save_multi_lora_checkpoints
 
             controller = get_multi_lora_controller()
             adapter_configs = ray.get(controller.adapter_configs.remote())
