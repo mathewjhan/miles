@@ -9,7 +9,7 @@ producer + drain-a-batch) but for multi-LoRA:
     normal-shaped abort response for in-flight-retired stragglers,
   - recycles aborted/dummied groups back to the data source,
   - reuses ``generate_rollout_async``'s postprocess (dynamic filter,
-    sample filter, logprob recompute).
+    sample filter.
 
 The per-group logic is factored into ``process_group`` (testable without a
 cluster); ``generate_fn`` defaults to the library ``generate_and_rm_group`` but
@@ -132,7 +132,7 @@ class AsyncMultiLoRAWorker:
         if result is not None:
             self.output_queue.put(result)
 
-    def drain_completed(self) -> list[list[Sample]]:
+    def get_completed_groups(self) -> list[list[Sample]]:
         out = []
         while True:
             try:
@@ -173,7 +173,7 @@ async def generate_rollout_multi_lora_async(
     last_progress = start_time
     while len(data) < target_data_size:
         made_progress = False
-        for group in worker.drain_completed():
+        for group in worker.get_completed_groups():
             adapter_name = group[0].adapter.name if group and group[0].adapter else None
             if adapter_name not in active_names:
                 continue
