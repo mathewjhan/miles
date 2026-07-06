@@ -43,6 +43,9 @@ class MultiLoRAAsyncController:
     def free_slot(self, name: str) -> int:
         return self.logic.free_slot(name)
 
+    def increment_slot_version(self, name: str) -> None:
+        self.logic.increment_slot_version(name)
+
     def active_adapters(self) -> dict:
         return self.logic.active_adapters()
 

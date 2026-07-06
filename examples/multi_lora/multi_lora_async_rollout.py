@@ -34,6 +34,10 @@ from miles.rollout.sglang_rollout import (
 )
 from miles.utils.async_utils import run
 from miles.utils.misc import load_function
+import ray
+
+from miles.ray.multi_lora_controller import get_multi_lora_controller
+
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -52,6 +56,16 @@ async def process_group(
     ``data_source``).
     """
     result = await generate_fn(args, group, sampling_params)
+
+    adapter_name = group[0].adapter.name if group and group[0].adapter else None
+    if adapter_name is not None:
+        try:
+            adapters = ray.get(get_multi_lora_controller().active_adapters.remote())
+            version = adapters[adapter_name].version if adapter_name in adapters else 0
+            for s in result:
+                s.metadata["slot_version"] = version
+        except Exception:
+            pass
 
     if any(s.status == Sample.Status.ABORTED for s in result):
         for s in result:
@@ -162,11 +176,13 @@ async def generate_rollout_multi_lora_async(
 
     worker = AsyncMultiLoRAWorker.get_or_create(args, data_source, generate_fn)
 
-    # Read the active adapter set once — groups for deregistered adapters (still
-    # in the queue from before the deregister) are stale and must not be trained
-    # (their Megatron slot may have been cleaned up by reconcile). Discard them.
-    from miles.ray.multi_lora_controller import get_multi_lora_controller
-    active_names = set((await get_multi_lora_controller().active_adapters.remote()).keys())
+    # Read active adapters (names + slot versions). Groups for deregistered
+    # adapters are discarded. Groups whose slot version is too far behind the
+    # current version (stale — generated under old weights) are also discarded.
+    max_staleness = getattr(args, "max_weight_staleness", None)
+    adapters = await get_multi_lora_controller().active_adapters.remote()
+    active_names = set(adapters.keys())
+    current_versions = {name: a.version for name, a in adapters.items()}
 
     data: list[list[Sample]] = []
     start_time = time.time()
@@ -177,6 +193,10 @@ async def generate_rollout_multi_lora_async(
             adapter_name = group[0].adapter.name if group and group[0].adapter else None
             if adapter_name not in active_names:
                 continue
+            if max_staleness is not None:
+                stamped = group[0].metadata.get("slot_version")
+                if stamped is not None and current_versions.get(adapter_name, 0) - stamped > max_staleness:
+                    continue
             f = call_dynamic_filter(dynamic_filter, args, group)
             if not f.keep:
                 metric_gatherer.on_dynamic_filter_drop(reason=f.reason)

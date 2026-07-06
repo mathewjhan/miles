@@ -47,6 +47,7 @@ class MultiLoRAControllerLogic:
         self.configs: dict[str, Any] = {}
         self.pending_cleanup: dict[str, int] = {}
         self.in_flight: dict[str, str] = {}
+        self.slot_versions: dict[str, int] = {}
 
     def register_adapter(self, name: str, config: Any) -> dict:
         if name in self.slots:
@@ -69,11 +70,15 @@ class MultiLoRAControllerLogic:
         slot = self.pending_cleanup.pop(name, None)
         if slot is not None:
             self.free_slots.add(slot)
+        self.slot_versions.pop(name, None)
         return slot if slot is not None else -1
+
+    def increment_slot_version(self, name: str) -> None:
+        self.slot_versions[name] = self.slot_versions.get(name, 0) + 1
 
     def active_adapters(self) -> dict[str, RegisteredAdapter]:
         return {
-            name: RegisteredAdapter(name, self.configs[name], slot)
+            name: RegisteredAdapter(name, self.configs[name], slot, self.slot_versions.get(name, 0))
             for name, slot in self.slots.items()
         }
 

@@ -41,6 +41,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --multi-lora-disable-service-mode \
    --sglang-lora-backend triton \
    --pause-generation-mode in_place \
+   --max-weight-staleness 2 \
    \
    --apply-chat-template \
    --rollout-shuffle \
