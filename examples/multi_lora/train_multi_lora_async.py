@@ -83,6 +83,8 @@ async def main(args):
         # adapters' last batch already trained) and before update_weights.
         await actor_model.reconcile_adapters()
         await actor_model.update_weights()
+        for name in active:
+            await controller.increment_slot_version.remote(name)
 
         rollout_data = await rollout_manager.generate.remote(rollout_id)
         await actor_model.train(rollout_id, rollout_data)
