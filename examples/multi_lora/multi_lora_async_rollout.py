@@ -35,7 +35,7 @@ from miles.rollout.sglang_rollout import (
 from miles.utils.async_utils import run
 from miles.utils.misc import load_function
 
-from miles.ray.multi_lora_controller import slot_version_cache
+from miles.ray.multi_lora_controller import SlotVersionCache
 
 from miles.utils.types import Sample
 
@@ -60,7 +60,7 @@ async def process_group(
     adapter_name = group[0].adapter.name if group and group[0].adapter else None
     submission_version: int | None = None
     if adapter_name is not None:
-        submission_version = await slot_version_cache.get(adapter_name)
+        submission_version = await SlotVersionCache().get(adapter_name)
 
     if submission_version is not None:
         for s in group:
@@ -203,7 +203,7 @@ async def generate_rollout_multi_lora_async(
     last_progress = start_time
     while len(data) < target_data_size:
         made_progress = False
-        current_versions = await slot_version_cache.get_all()
+        current_versions = await SlotVersionCache().get_all()
         for group in worker.get_completed_groups():
             adapter_name = group[0].adapter.name if group and group[0].adapter else None
             if adapter_name not in current_versions:

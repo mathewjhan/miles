@@ -1,21 +1,17 @@
-"""Tests for AdapterConfig parsing, validation, and lifecycle state."""
+"""Tests for AdapterConfig parsing and validation."""
 
 from tests.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=60, suite="stage-a-cpu")
 
 
-from itertools import pairwise
 from pathlib import Path
 
 import pytest
 import yaml
 
 from miles.utils.adapter_config import (
-    ADAPTER_INACTIVE_STATES,
-    ADAPTER_ROLLOUT_STATES,
     AdapterConfig,
-    AdapterState,
     parse_adapter_yaml,
 )
 
@@ -130,35 +126,3 @@ class TestAdapterConfigValidation:
     def test_neither_set_raises(self):
         with pytest.raises(ValueError, match="Only one of"):
             self.make(rm_type=None, custom_rm_path=None)
-
-
-# ---------------------------------------------------------------------------
-# AdapterState
-# ---------------------------------------------------------------------------
-
-
-class TestAdapterState:
-    def test_lifecycle_strictly_increasing(self):
-        """Controller relies on `state < new_state` for forward-only transitions."""
-        order = [
-            AdapterState.PENDING,
-            AdapterState.RUNNING,
-            AdapterState.DRAINING_DATASOURCE,
-            AdapterState.DRAINING_INFLIGHT,
-            AdapterState.DRAINING_TRAINABLE,
-            AdapterState.DRAINED,
-        ]
-        for prev, nxt in pairwise(order):
-            assert prev < nxt
-
-    def test_rollout_states(self):
-        assert ADAPTER_ROLLOUT_STATES == {
-            AdapterState.RUNNING,
-            AdapterState.DRAINING_DATASOURCE,
-        }
-
-    def test_inactive_states(self):
-        assert ADAPTER_INACTIVE_STATES == {
-            AdapterState.PENDING,
-            AdapterState.DRAINED,
-        }

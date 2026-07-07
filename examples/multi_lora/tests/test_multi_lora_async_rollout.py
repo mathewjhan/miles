@@ -75,7 +75,7 @@ async def test_process_group_stamps_submission_version(monkeypatch):
         cache.bump("A", 7)  # update lands mid-generation
         return await gen_completed(args, group, sampling_params)
 
-    monkeypatch.setattr(mod, "slot_version_cache", cache)
+    monkeypatch.setattr(mod, "SlotVersionCache", lambda: cache)
 
     ds = FakeDataSource()
     g = group("A")
@@ -91,7 +91,7 @@ async def test_process_group_no_adapter_skips_stamp(monkeypatch):
         async def get(self, adapter_name):
             raise AssertionError("version cache should not be queried for adapter-less group")
 
-    monkeypatch.setattr(mod, "slot_version_cache", FailingCache())
+    monkeypatch.setattr(mod, "SlotVersionCache", FailingCache)
 
     ds = FakeDataSource()
     g = [Sample(prompt="p", adapter=None)]
