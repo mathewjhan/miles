@@ -178,7 +178,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         payload["lora_path"] = f"__miles_slot_{sample.adapter.slot}"
         payload["rid"] = f"{sample.adapter.name}_{uuid.uuid4().hex}"
         if (slot_version := await slot_version_cache.get(sample.adapter.name)) is not None:
-            payload["extra_key"] = f"v{slot_version}"
+            payload["extra_key"] = f"{sample.adapter.name}:v{slot_version}"
     elif is_lora_enabled(args):
         payload["lora_path"] = LORA_ADAPTER_NAME
 
