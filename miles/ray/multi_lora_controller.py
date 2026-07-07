@@ -63,7 +63,9 @@ class MultiLoRAController:
         backend_cls = _load_subclass(getattr(args, "multi_lora_backend_path", None), MultiLoRABackend)
         server_cls = _load_subclass(getattr(args, "multi_lora_http_server_path", None), MultiLoRAHTTPServer)
         self.backend = backend_cls(args.multi_lora_n_adapters, upstream_url)
-        self.server = server_cls(self.backend, host, port)
+        self.server = server_cls(
+            self.backend, host, port, api_port=getattr(args, "multi_lora_api_port", 0)
+        )
 
     async def start(self) -> int:
         await self.backend.init()
@@ -97,6 +99,9 @@ class MultiLoRAController:
 
     def http_port(self) -> int:
         return self.server.actual_port
+
+    def api_port(self) -> int:
+        return self.server.actual_api_port
 
 
 def create_controller(args, upstream_url: str, host: str = "0.0.0.0", port: int = 0):

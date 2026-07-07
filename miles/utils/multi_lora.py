@@ -208,23 +208,41 @@ def extract_rid(body: bytes) -> str | None:
 
 
 class MultiLoRAHTTPServer:
-    """FastAPI transport over a ``MultiLoRABackend``: control endpoints plus a
-    catch-all proxy, served by an embedded uvicorn. Subclasses override
-    ``add_routes`` (custom routes take precedence over the catch-all proxy)
-    and ``create_app`` (e.g. middlewares)."""
+    """FastAPI transport over a ``MultiLoRABackend``, served by embedded
+    uvicorns on two listeners with different audiences:
 
-    def __init__(self, backend, host="127.0.0.1", port=0):
+    * proxy listener (``port``): the catch-all data-plane proxy that rollout
+      requests flow through. Cluster-internal; never expose it.
+    * api listener (``api_port``): the control plane (register/deregister/
+      active + subclass routes). The only listener that should be exposed.
+
+    Subclasses override ``add_routes`` and ``create_app`` (e.g. middlewares) —
+    both scoped to the api app, so custom routes and auth can never shadow or
+    leak the proxy."""
+
+    def __init__(self, backend, host="127.0.0.1", port=0, api_port=0):
         self.backend = backend
         self.host = host
         self.port = port
-        self.server: uvicorn.Server | None = None
-        self.serve_task: asyncio.Task | None = None
+        self.api_port = api_port
+        self.proxy_server: uvicorn.Server | None = None
+        self.proxy_task: asyncio.Task | None = None
+        self.api_server: uvicorn.Server | None = None
+        self.api_task: asyncio.Task | None = None
+
+    @staticmethod
+    def _bound_port(server: uvicorn.Server | None, configured: int) -> int:
+        if server is not None and server.started:
+            return server.servers[0].sockets[0].getsockname()[1]
+        return configured
 
     @property
     def actual_port(self) -> int:
-        if self.server is not None and self.server.started:
-            return self.server.servers[0].sockets[0].getsockname()[1]
-        return self.port
+        return self._bound_port(self.proxy_server, self.port)
+
+    @property
+    def actual_api_port(self) -> int:
+        return self._bound_port(self.api_server, self.api_port)
 
     def create_app(self) -> FastAPI:
         return FastAPI(title="Miles Multi-LoRA Controller")
@@ -234,25 +252,35 @@ class MultiLoRAHTTPServer:
         app.post("/deregister_adapter")(self.deregister_handler)
         app.get("/active_adapters")(self.active_handler)
 
-    async def start(self) -> None:
-        app = self.create_app()
-        self.add_routes(app)
+    def create_proxy_app(self) -> FastAPI:
+        app = FastAPI(title="Miles Multi-LoRA Proxy")
         app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])(self.proxy_handler)
-        config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning", access_log=False)
-        self.server = uvicorn.Server(config)
-        self.serve_task = asyncio.create_task(self.server.serve())
-        while not self.server.started:
-            if self.serve_task.done():
-                self.serve_task.result()
+        return app
+
+    async def _serve(self, app: FastAPI, port: int) -> tuple[uvicorn.Server, asyncio.Task]:
+        config = uvicorn.Config(app, host=self.host, port=port, log_level="warning", access_log=False)
+        server = uvicorn.Server(config)
+        task = asyncio.create_task(server.serve())
+        while not server.started:
+            if task.done():
+                task.result()
                 raise RuntimeError("uvicorn exited before startup completed")
             await asyncio.sleep(0.01)
+        return server, task
+
+    async def start(self) -> None:
+        self.proxy_server, self.proxy_task = await self._serve(self.create_proxy_app(), self.port)
+        api_app = self.create_app()
+        self.add_routes(api_app)
+        self.api_server, self.api_task = await self._serve(api_app, self.api_port)
 
     async def stop(self) -> None:
-        if self.server is not None:
-            self.server.should_exit = True
-            await self.serve_task
-            self.server = None
-            self.serve_task = None
+        for server, task in ((self.api_server, self.api_task), (self.proxy_server, self.proxy_task)):
+            if server is not None:
+                server.should_exit = True
+                await task
+        self.proxy_server = self.proxy_task = None
+        self.api_server = self.api_task = None
 
     async def register_handler(self, request: Request):
         body = await request.json()
