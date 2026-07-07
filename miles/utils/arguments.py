@@ -1223,6 +1223,24 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Sync LoRA weights via tensor instead of file (more efficient)",
             )
             parser.add_argument(
+                "--lora-base-cpu-backup",
+                action="store_true",
+                default=False,
+                help=(
+                    "LoRA + colocate: keep SGLang-side CPU mirror of base weights "
+                    "and skip per-step base sync. Trades host RAM for faster "
+                    "onload/offload. Ignored unless --colocate and LoRA are both on."
+                ),
+            )
+            parser.add_argument(
+                "--experts-shared-outer-loras",
+                action="store_true",
+                default=False,
+                help="Enable shared-outer grouped-expert LoRA (gate_up lora_A and "
+                "down lora_B shared across experts, expert_dim=1). Matches SGLang "
+                "PR #21466's experts_shared_outer_loras=True serving contract.",
+            )
+            parser.add_argument(
                 "--multi-lora-n-adapters",
                 type=int,
                 default=0,
@@ -1265,30 +1283,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_false",
                 dest="multi_lora_service_mode",
                 help="Disable service mode. By default, the trainer waits indefinitely for new adapters. With this flag, it exits after all adapters have been processed.",
-            )
-            parser.add_argument(
-                "--custom-generate-state-hooks-path",
-                type=str,
-                default=None,
-                help="Path to a custom miles.rollout.sglang_rollout.GenerateStateHooks subclass",
-            )
-            parser.add_argument(
-                "--lora-base-cpu-backup",
-                action="store_true",
-                default=False,
-                help=(
-                    "LoRA + colocate: keep SGLang-side CPU mirror of base weights "
-                    "and skip per-step base sync. Trades host RAM for faster "
-                    "onload/offload. Ignored unless --colocate and LoRA are both on."
-                ),
-            )
-            parser.add_argument(
-                "--experts-shared-outer-loras",
-                action="store_true",
-                default=False,
-                help="Enable shared-outer grouped-expert LoRA (gate_up lora_A and "
-                "down lora_B shared across experts, expert_dim=1). Matches SGLang "
-                "PR #21466's experts_shared_outer_loras=True serving contract.",
             )
             return parser
 
