@@ -83,6 +83,40 @@ async def test_deregister_mid_flight_dummies():
 
 
 @pytest.mark.asyncio
+async def test_deregister_aborts_adapter_requests():
+    aborts: list[dict] = []
+    worker_url = ""
+
+    async def list_workers(request):
+        return web.json_response({"urls": [worker_url]})
+
+    async def abort_request(request):
+        aborts.append(await request.json())
+        return web.json_response({})
+
+    app = web.Application()
+    app.router.add_get("/list_workers", list_workers)
+    app.router.add_post("/abort_request", abort_request)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    worker_url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+
+    logic = MultiLoRAControllerLogic(max_adapters=4)
+    srv = MultiLoRAHTTPServer(logic, worker_url)
+    await srv.start()
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(f"http://127.0.0.1:{srv.actual_port}/register_adapter", json={"name": "A"})
+            await s.post(f"http://127.0.0.1:{srv.actual_port}/deregister_adapter", json={"name": "A"})
+        assert aborts == [{"rid": "A_"}]
+    finally:
+        await srv.stop()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_block_retired_adapter():
     upstream_runner, upstream_url = await _start_mock_upstream()
     logic = MultiLoRAControllerLogic(max_adapters=4)

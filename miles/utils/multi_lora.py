@@ -5,23 +5,29 @@ HTTP server, but the logic + HTTP server themselves are plain asyncio + aiohttp 
 testable without Ray or torch.
 
 Correctness for adapter replacement: each rollout request carries
-``rid = f"{adapter_name}_{uuid4().hex}"``. The controller blocks forwards for
-adapters no longer active and dummies responses whose adapter was deregistered
-while the request was in flight. No SGLang changes, no versions, no drain.
+``rid = make_rid(adapter_name)``. The controller blocks forwards for
+adapters no longer active, dummies responses whose adapter was deregistered
+while the request was in flight, and aborts the adapter's queued/running engine
+requests on deregister (SGLang matches abort rids by prefix).
 """
 
+import asyncio
 import json
+import logging
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 import aiohttp
 from aiohttp import web
 
 from miles.utils.adapter_config import RegisteredAdapter
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "MultiLoRAControllerLogic",
     "MultiLoRAHTTPServer",
+    "RID_SEPARATOR",
     "make_rid",
     "parse_adapter",
     "dummy_response_body",
@@ -29,12 +35,18 @@ __all__ = [
 ]
 
 
+# Separator between adapter name and request uuid in rids. Must not appear in
+# adapter names (enforced at registration) so that rid prefix matching in
+# SGLang's abort_request cannot hit another adapter's requests.
+RID_SEPARATOR = "::"
+
+
 def make_rid(adapter_name: str) -> str:
-    return f"{adapter_name}_{uuid.uuid4().hex}"
+    return f"{adapter_name}{RID_SEPARATOR}{uuid.uuid4().hex}"
 
 
 def parse_adapter(rid: str) -> str:
-    return rid.rsplit("_", 1)[0]
+    return rid.rsplit(RID_SEPARATOR, 1)[0]
 
 
 class MultiLoRAControllerLogic:
@@ -50,6 +62,8 @@ class MultiLoRAControllerLogic:
         self.slot_versions: dict[str, int] = {}
 
     def register_adapter(self, name: str, config: Any) -> dict:
+        if RID_SEPARATOR in name:
+            raise ValueError(f"Adapter name '{name}' must not contain '{RID_SEPARATOR}'")
         if name in self.slots:
             raise ValueError(f"Adapter '{name}' already registered")
         if not self.free_slots:
@@ -109,7 +123,7 @@ def dummy_response_body(rid: str) -> dict:
     }
 
 
-def extract_rid(body: bytes) -> Optional[str]:
+def extract_rid(body: bytes) -> str | None:
     if not body:
         return None
     try:
@@ -130,9 +144,9 @@ class MultiLoRAHTTPServer:
         self.upstream_url = upstream_url.rstrip("/")
         self.host = host
         self.port = port
-        self.runner: Optional[web.AppRunner] = None
-        self.site: Optional[web.TCPSite] = None
-        self.client: Optional[aiohttp.ClientSession] = None
+        self.runner: web.AppRunner | None = None
+        self.site: web.TCPSite | None = None
+        self.client: aiohttp.ClientSession | None = None
 
     @property
     def actual_port(self) -> int:
@@ -166,7 +180,40 @@ class MultiLoRAHTTPServer:
     async def deregister_handler(self, request):
         body = await request.json()
         self.logic.deregister_adapter(body["name"])
+        await self.abort_adapter_requests(body["name"])
         return web.json_response({"ok": True, "active": self.logic.active()})
+
+    async def worker_urls(self) -> list[str]:
+        assert self.client is not None
+        for endpoint, extract in (
+            ("/list_workers", lambda body: body["urls"]),
+            ("/workers", lambda body: [worker["url"] for worker in body["workers"]]),
+        ):
+            try:
+                async with self.client.get(f"{self.upstream_url}{endpoint}") as resp:
+                    if resp.status == 200:
+                        return extract(await resp.json())
+            except Exception:
+                continue
+        return []
+
+    async def abort_adapter_requests(self, adapter_name: str) -> None:
+        """Abort the adapter's in-flight requests on all workers, by exact rid:
+        the engine drops aborts whose rid is not a known request, so a prefix
+        rid would be silently ignored — and for the same reason, posting a rid
+        to workers that don't own it is a harmless no-op."""
+        rids = [rid for rid, name in self.logic.in_flight.items() if name == adapter_name]
+        if not rids:
+            return
+        urls = await self.worker_urls()
+
+        async def abort(url: str, rid: str) -> None:
+            async with self.client.post(f"{url}/abort_request", json={"rid": rid}) as resp:
+                await resp.read()
+
+        results = await asyncio.gather(*(abort(url, rid) for url in urls for rid in rids), return_exceptions=True)
+        if failures := sum(isinstance(r, Exception) for r in results):
+            logger.warning(f"Abort for adapter '{adapter_name}': {failures}/{len(results)} posts failed")
 
     async def active_handler(self, request):
         return web.json_response(self.logic.active())

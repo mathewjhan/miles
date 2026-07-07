@@ -2,7 +2,7 @@
 
 Mirrors ``examples/fully_async/fully_async_rollout.py`` (continuous background
 producer + drain-a-batch) but for multi-LoRA:
-  - ``generate`` sets ``rid = {adapter_name}_{uuid}`` next to ``lora_path`` for
+  - ``generate`` sets ``rid = make_rid(adapter_name)`` next to ``lora_path`` for
     multi-LoRA samples, so the controller proxy can correlate/dummy by adapter,
   - sends through the multi-LoRA controller proxy (``--sglang-router-ip/port``
     pointed at the controller), which blocks retired adapters and returns a

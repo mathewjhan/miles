@@ -64,8 +64,9 @@ class MultiLoRAAsyncController:
     def register_adapter(self, name: str, config: Any) -> dict:
         return self.logic.register_adapter(name, config)
 
-    def deregister_adapter(self, name: str) -> None:
+    async def deregister_adapter(self, name: str) -> None:
         self.logic.deregister_adapter(name)
+        await self.server.abort_adapter_requests(name)
 
     def free_slot(self, name: str) -> int:
         return self.logic.free_slot(name)
