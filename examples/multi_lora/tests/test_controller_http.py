@@ -83,34 +83,42 @@ async def test_deregister_mid_flight_dummies():
 
 
 @pytest.mark.asyncio
-async def test_deregister_aborts_adapter_requests():
+async def test_deregister_aborts_in_flight_requests():
     aborts: list[dict] = []
-    worker_url = ""
+    worker_urls: list[str] = []
 
-    async def list_workers(request):
-        return web.json_response({"urls": [worker_url]})
-
-    async def abort_request(request):
-        aborts.append(await request.json())
-        return web.json_response({})
+    async def handler(request):
+        if request.path == "/list_workers":
+            return web.json_response({"urls": worker_urls})
+        if request.path == "/abort_request":
+            aborts.append(json.loads(await request.read()))
+            return web.json_response({})
+        await asyncio.sleep(0.2)  # keep /generate in flight
+        return web.json_response({"text": "upstream-ok"})
 
     app = web.Application()
-    app.router.add_get("/list_workers", list_workers)
-    app.router.add_post("/abort_request", abort_request)
+    app.router.add_resource("/{tail:.*}").add_route("*", handler)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
-    worker_url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+    upstream_url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+    worker_urls.append(upstream_url)
 
     logic = MultiLoRAControllerLogic(max_adapters=4)
-    srv = MultiLoRAHTTPServer(logic, worker_url)
+    srv = MultiLoRAHTTPServer(logic, upstream_url)
     await srv.start()
     try:
         async with aiohttp.ClientSession() as s:
             await s.post(f"http://127.0.0.1:{srv.actual_port}/register_adapter", json={"name": "A"})
+            rid = make_rid("A")
+            task = asyncio.create_task(
+                _post(s, f"http://127.0.0.1:{srv.actual_port}/generate", {"rid": rid, "text": "hi"})
+            )
+            await asyncio.sleep(0.05)  # let it be forwarded/in-flight
             await s.post(f"http://127.0.0.1:{srv.actual_port}/deregister_adapter", json={"name": "A"})
-        assert aborts == [{"rid": "A_"}]
+            await task
+        assert aborts == [{"rid": rid}]
     finally:
         await srv.stop()
         await runner.cleanup()
