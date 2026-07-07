@@ -2,37 +2,71 @@
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 
 import aiohttp
-from aiohttp import web
 import pytest
+from aiohttp import web
 
-from miles.utils.multi_lora import (
-    MultiLoRABackend,
-    MultiLoRAHTTPServer,
-    make_rid,
-)
-
-
-async def start_server(upstream_url: str, server_cls=MultiLoRAHTTPServer) -> tuple[MultiLoRABackend, MultiLoRAHTTPServer]:
-    backend = MultiLoRABackend(4, upstream_url)
-    srv = server_cls(backend)
-    await backend.init()
-    await srv.start()
-    return backend, srv
-
-
-async def stop_server(backend: MultiLoRABackend, srv: MultiLoRAHTTPServer) -> None:
-    await srv.stop()
-    await backend.close()
+from miles.utils.multi_lora import MultiLoRABackend, MultiLoRAHTTPServer, make_rid
 
 
 def _is_dummy(body: dict) -> bool:
     return body.get("meta_info", {}).get("finish_reason", {}).get("type") == "abort"
 
 
-async def _start_mock_upstream(delay: float = 0.0):
-    async def handler(request):
+class ControllerHarness:
+    """Running controller (backend + both listeners) against a mock upstream
+    that acts as router (/list_workers) and worker (/abort_request, echo)."""
+
+    def __init__(self, session: aiohttp.ClientSession, backend: MultiLoRABackend, srv: MultiLoRAHTTPServer):
+        self.session = session
+        self.backend = backend
+        self.srv = srv
+        self.aborts: list[dict] = []
+
+    @property
+    def proxy_base(self) -> str:
+        return f"http://127.0.0.1:{self.srv.actual_port}"
+
+    @property
+    def api_base(self) -> str:
+        return f"http://127.0.0.1:{self.srv.actual_api_port}"
+
+    async def api_post(self, path: str, payload: dict) -> tuple[int, dict]:
+        async with self.session.post(f"{self.api_base}{path}", json=payload) as resp:
+            return resp.status, await resp.json()
+
+    async def api_get(self, path: str) -> tuple[int, dict, dict]:
+        async with self.session.get(f"{self.api_base}{path}") as resp:
+            headers = {k.lower(): v for k, v in resp.headers.items()}
+            return resp.status, await resp.json(), headers
+
+    async def proxy_post(self, path: str, payload: dict) -> tuple[int, dict]:
+        async with self.session.post(f"{self.proxy_base}{path}", json=payload) as resp:
+            return resp.status, await resp.json()
+
+    async def register(self, name: str) -> tuple[int, dict]:
+        return await self.api_post("/register_adapter", {"name": name})
+
+    async def deregister(self, name: str) -> tuple[int, dict]:
+        return await self.api_post("/deregister_adapter", {"name": name})
+
+    async def generate(self, rid: str) -> tuple[int, dict]:
+        return await self.proxy_post("/generate", {"rid": rid, "text": "hi"})
+
+
+@asynccontextmanager
+async def running_controller(delay: float = 0.0, server_cls=MultiLoRAHTTPServer):
+    upstream_url = ""
+    harness: ControllerHarness | None = None
+
+    async def upstream_handler(request):
+        if request.path == "/list_workers":
+            return web.json_response({"urls": [upstream_url]})
+        if request.path == "/abort_request":
+            harness.aborts.append(json.loads(await request.read()))
+            return web.json_response({})
         if delay:
             await asyncio.sleep(delay)
         body = await request.read()
@@ -40,95 +74,75 @@ async def _start_mock_upstream(delay: float = 0.0):
         return web.json_response({"text": "upstream-ok", "rid": rid})
 
     app = web.Application()
-    app.router.add_resource("/{tail:.*}").add_route("*", handler)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = site._server.sockets[0].getsockname()[1]
-    return runner, f"http://127.0.0.1:{port}"
-
-
-async def _post(session, url, payload):
-    async with session.post(url, json=payload) as resp:
-        return resp.status, await resp.json()
-
-
-@pytest.mark.asyncio
-async def test_forward_active_returns_upstream():
-    upstream_runner, upstream_url = await _start_mock_upstream()
-    backend, srv = await start_server(upstream_url)
-    try:
-        async with aiohttp.ClientSession() as s:
-            await s.post(f"http://127.0.0.1:{srv.actual_api_port}/register_adapter", json={"name": "A"})
-            rid = make_rid("A")
-            status, body = await _post(s, f"http://127.0.0.1:{srv.actual_port}/generate", {"rid": rid, "text": "hi"})
-            assert status == 200
-            assert body["text"] == "upstream-ok"
-    finally:
-        await stop_server(backend, srv)
-        await upstream_runner.cleanup()
-
-
-@pytest.mark.asyncio
-async def test_deregister_mid_flight_dummies():
-    upstream_runner, upstream_url = await _start_mock_upstream(delay=0.2)
-    backend, srv = await start_server(upstream_url)
-    try:
-        async with aiohttp.ClientSession() as s:
-            await s.post(f"http://127.0.0.1:{srv.actual_api_port}/register_adapter", json={"name": "A"})
-            rid = make_rid("A")
-            task = asyncio.create_task(
-                _post(s, f"http://127.0.0.1:{srv.actual_port}/generate", {"rid": rid, "text": "hi"})
-            )
-            await asyncio.sleep(0.05)  # let it be forwarded/in-flight
-            await s.post(f"http://127.0.0.1:{srv.actual_api_port}/deregister_adapter", json={"name": "A"})
-            status, body = await task
-            assert _is_dummy(body)
-            assert body["text"] == ""
-    finally:
-        await stop_server(backend, srv)
-        await upstream_runner.cleanup()
-
-
-@pytest.mark.asyncio
-async def test_deregister_aborts_in_flight_requests():
-    aborts: list[dict] = []
-    worker_urls: list[str] = []
-
-    async def handler(request):
-        if request.path == "/list_workers":
-            return web.json_response({"urls": worker_urls})
-        if request.path == "/abort_request":
-            aborts.append(json.loads(await request.read()))
-            return web.json_response({})
-        await asyncio.sleep(0.2)  # keep /generate in flight
-        return web.json_response({"text": "upstream-ok"})
-
-    app = web.Application()
-    app.router.add_resource("/{tail:.*}").add_route("*", handler)
+    app.router.add_resource("/{tail:.*}").add_route("*", upstream_handler)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     upstream_url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
-    worker_urls.append(upstream_url)
 
-    backend, srv = await start_server(upstream_url)
+    backend = MultiLoRABackend(4, upstream_url)
+    srv = server_cls(backend)
+    await backend.init()
+    await srv.start()
     try:
-        async with aiohttp.ClientSession() as s:
-            await s.post(f"http://127.0.0.1:{srv.actual_api_port}/register_adapter", json={"name": "A"})
-            rid = make_rid("A")
-            task = asyncio.create_task(
-                _post(s, f"http://127.0.0.1:{srv.actual_port}/generate", {"rid": rid, "text": "hi"})
-            )
-            await asyncio.sleep(0.05)  # let it be forwarded/in-flight
-            await s.post(f"http://127.0.0.1:{srv.actual_api_port}/deregister_adapter", json={"name": "A"})
-            await task
-        assert aborts == [{"rid": rid}]
+        async with aiohttp.ClientSession() as session:
+            harness = ControllerHarness(session, backend, srv)
+            yield harness
     finally:
-        await stop_server(backend, srv)
+        await srv.stop()
+        await backend.close()
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_forward_active_returns_upstream():
+    async with running_controller() as ctl:
+        await ctl.register("A")
+        status, body = await ctl.generate(make_rid("A"))
+        assert status == 200
+        assert body["text"] == "upstream-ok"
+
+
+@pytest.mark.asyncio
+async def test_block_retired_adapter():
+    async with running_controller() as ctl:
+        _, body = await ctl.generate(make_rid("A"))  # never registered
+        assert _is_dummy(body)  # blocked, not forwarded
+
+
+@pytest.mark.asyncio
+async def test_deregister_mid_flight_dummies():
+    async with running_controller(delay=0.2) as ctl:
+        await ctl.register("A")
+        task = asyncio.create_task(ctl.generate(make_rid("A")))
+        await asyncio.sleep(0.05)  # let it be forwarded/in-flight
+        await ctl.deregister("A")
+        _, body = await task
+        assert _is_dummy(body)
+        assert body["text"] == ""
+
+
+@pytest.mark.asyncio
+async def test_deregister_aborts_in_flight_requests():
+    async with running_controller(delay=0.2) as ctl:
+        await ctl.register("A")
+        rid = make_rid("A")
+        task = asyncio.create_task(ctl.generate(rid))
+        await asyncio.sleep(0.05)  # let it be forwarded/in-flight
+        await ctl.deregister("A")
+        await task
+        assert ctl.aborts == [{"rid": rid}]
+
+
+@pytest.mark.asyncio
+async def test_control_routes_only_on_api_listener():
+    """A control route hitting the proxy port is forwarded upstream, not handled."""
+    async with running_controller() as ctl:
+        assert ctl.srv.actual_port != ctl.srv.actual_api_port
+        _, body = await ctl.proxy_post("/register_adapter", {"name": "A"})
+        assert body.get("text") == "upstream-ok"
+        assert ctl.backend.registry.active() == {}
 
 
 @pytest.mark.asyncio
@@ -152,47 +166,7 @@ async def test_custom_server_subclass_adds_routes():
         async def custom_status(self):
             return {"custom": True, "active": self.backend.registry.active()}
 
-    upstream_runner, upstream_url = await _start_mock_upstream()
-    backend, srv = await start_server(upstream_url, server_cls=CustomServer)
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(f"http://127.0.0.1:{srv.actual_api_port}/custom_status") as resp:
-                body = await resp.json()
-                assert resp.headers.get("X-Custom-Server") == "1"
-            assert body == {"custom": True, "active": {}}
-    finally:
-        await stop_server(backend, srv)
-        await upstream_runner.cleanup()
-
-
-@pytest.mark.asyncio
-async def test_control_routes_only_on_api_listener():
-    """The proxy listener must not serve control routes: a /register_adapter
-    hitting the proxy port is just forwarded upstream like any other path."""
-    upstream_runner, upstream_url = await _start_mock_upstream()
-    backend, srv = await start_server(upstream_url)
-    try:
-        assert srv.actual_port != srv.actual_api_port
-        async with aiohttp.ClientSession() as s:
-            status, body = await _post(
-                s, f"http://127.0.0.1:{srv.actual_port}/register_adapter", {"name": "A"}
-            )
-            assert body.get("text") == "upstream-ok"  # proxied, not handled
-            assert backend.registry.active() == {}
-    finally:
-        await stop_server(backend, srv)
-        await upstream_runner.cleanup()
-
-
-@pytest.mark.asyncio
-async def test_block_retired_adapter():
-    upstream_runner, upstream_url = await _start_mock_upstream()
-    backend, srv = await start_server(upstream_url)
-    try:
-        async with aiohttp.ClientSession() as s:
-            rid = make_rid("A")  # never registered
-            status, body = await _post(s, f"http://127.0.0.1:{srv.actual_port}/generate", {"rid": rid, "text": "hi"})
-            assert _is_dummy(body)  # blocked, not forwarded
-    finally:
-        await stop_server(backend, srv)
-        await upstream_runner.cleanup()
+    async with running_controller(server_cls=CustomServer) as ctl:
+        _, body, headers = await ctl.api_get("/custom_status")
+        assert headers.get("x-custom-server") == "1"
+        assert body == {"custom": True, "active": {}}

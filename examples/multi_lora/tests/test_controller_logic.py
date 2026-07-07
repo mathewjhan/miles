@@ -1,6 +1,5 @@
-"""Fast tests for AdapterRegistry + MultiLoRABackend gating/validation (no Ray,
-no HTTP I/O, no SGLang, no torch). The backend constructor opens no sockets, so
-everything except the engine-facing abort is testable without starting it."""
+"""Fast tests for AdapterRegistry + MultiLoRABackend gating/validation
+(no Ray, no HTTP I/O, no SGLang, no torch)."""
 
 import pytest
 
@@ -32,12 +31,12 @@ def test_forward_active_then_response_kept():
     backend.registry.register("A", None)
     rid = make_rid("A")
     assert backend.on_forward(rid) is True
-    assert backend.on_response(rid) is False  # A still active -> keep
+    assert backend.on_response(rid) is False  # keep, not dummy
 
 
 def test_forward_blocked_for_unknown_adapter():
     backend = make_backend()
-    assert backend.on_forward(make_rid("A")) is False  # never registered -> block
+    assert backend.on_forward(make_rid("A")) is False
 
 
 def test_deregister_mid_flight_dummies_response():
@@ -45,8 +44,8 @@ def test_deregister_mid_flight_dummies_response():
     backend.registry.register("A", None)
     rid = make_rid("A")
     assert backend.on_forward(rid) is True
-    backend.registry.deregister("A")  # removed mid-flight
-    assert backend.on_response(rid) is True  # A gone -> dummy
+    backend.registry.deregister("A")
+    assert backend.on_response(rid) is True  # dummy
 
 
 def test_deregister_then_new_request_blocked():
@@ -58,12 +57,12 @@ def test_deregister_then_new_request_blocked():
 
 def test_deregister_holds_slot_until_free_slot():
     registry = AdapterRegistry(max_adapters=2)
-    registry.register("A", None)  # slot 0
-    registry.register("B", None)  # slot 1
-    registry.deregister("A")  # slot 0 held, not freed
-    assert not registry.free_slots  # no free slots (0 held, 1 in use)
-    registry.free_slot("A")  # trainer cleanup -> slot 0 freed
-    assert registry.register("C", None) == {"name": "C", "slot": 0}  # reuses freed slot
+    registry.register("A", None)
+    registry.register("B", None)
+    registry.deregister("A")
+    assert not registry.free_slots  # slot 0 held until cleanup
+    registry.free_slot("A")
+    assert registry.register("C", None) == {"name": "C", "slot": 0}
     assert registry.active() == {"B": 1, "C": 0}
 
 
@@ -73,11 +72,11 @@ def test_swap_a_to_b_independent():
     rid_a = make_rid("A")
     assert backend.on_forward(rid_a) is True
     backend.registry.deregister("A")
-    backend.registry.register("B", None)  # reuses slot 0
+    backend.registry.register("B", None)
     rid_b = make_rid("B")
-    assert backend.on_forward(rid_b) is True  # B active -> forward
-    assert backend.on_response(rid_a) is True  # straggler A -> dummy
-    assert backend.on_response(rid_b) is False  # B -> keep
+    assert backend.on_forward(rid_b) is True
+    assert backend.on_response(rid_a) is True  # straggler A dummied
+    assert backend.on_response(rid_b) is False
 
 
 @pytest.mark.asyncio
@@ -90,7 +89,7 @@ async def test_custom_backend_validation_rejects():
     backend = StrictBackend(4, "http://unused")
     with pytest.raises(ValueError, match="config is required"):
         await backend.register("A", None)
-    assert backend.registry.active() == {}  # rejected before touching the registry
+    assert backend.registry.active() == {}
 
     result = await backend.register("A", {"rm_type": "x"})
     assert result == {"name": "A", "slot": 0}
