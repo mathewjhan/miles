@@ -173,8 +173,12 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         payload["top_logprobs_num"] = opd_top_k
 
     if sample.adapter is not None:
+        from miles.ray.multi_lora_controller import slot_version_cache
+
         payload["lora_path"] = f"__miles_slot_{sample.adapter.slot}"
         payload["rid"] = f"{sample.adapter.name}_{uuid.uuid4().hex}"
+        if (slot_version := await slot_version_cache.get(sample.adapter.name)) is not None:
+            payload["extra_key"] = f"v{slot_version}"
     elif is_lora_enabled(args):
         payload["lora_path"] = LORA_ADAPTER_NAME
 

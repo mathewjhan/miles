@@ -34,43 +34,14 @@ from miles.rollout.sglang_rollout import (
 )
 from miles.utils.async_utils import run
 from miles.utils.misc import load_function
-import ray
 
-from miles.ray.multi_lora_controller import get_multi_lora_controller
+from miles.ray.multi_lora_controller import slot_version_cache
 
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
 GenerateFn = Callable[..., Any]
-
-
-class _AdapterVersionCache:
-    """Throttled query for the controller's active adapters (names + slot versions).
-
-    Mirrors ``fully_async_rollout._CachedWeightVersion``: a short-TTL cache so the
-    staleness filter sees a reasonably-fresh "current version" without issuing a
-    controller RPC on every drained group. Returns ``(active_names, versions)``.
-    """
-
-    def __init__(self, ttl: float = 1.0) -> None:
-        self._ttl = ttl
-        self._cached: tuple[set[str], dict[str, int]] | None = None
-        self._last_query: float = 0.0
-
-    async def get(self) -> tuple[set[str], dict[str, int]]:
-        now = time.monotonic()
-        if self._cached is not None and (now - self._last_query) < self._ttl:
-            return self._cached
-        try:
-            adapters = await get_multi_lora_controller().active_adapters.remote()
-            active_names = set(adapters.keys())
-            versions = {name: a.version for name, a in adapters.items()}
-            self._cached = (active_names, versions)
-            self._last_query = now
-        except Exception as e:
-            logger.debug(f"Failed to query adapter versions: {e}")
-        return self._cached if self._cached is not None else (set(), {})
 
 
 async def process_group(
@@ -83,21 +54,17 @@ async def process_group(
     be trained, or None if it was aborted/dummied (recycled back to
     ``data_source``).
 
-    The slot version is stamped at *submission* (before generation), not at
-    completion: the version that generated a group is the one live on the
-    engine when the request was sent. In fully-async, another update can bump
-    the controller version *during* generation; re-querying afterwards would
-    record that newer version and make the group look fresh to the staleness
-    filter even though it was decoded under the older weights.
+    The slot version is stamped at *submission*: the staleness filter needs the
+    version live when the request was sent, not the one after generation.
     """
     adapter_name = group[0].adapter.name if group and group[0].adapter else None
     submission_version: int | None = None
     if adapter_name is not None:
-        try:
-            adapters = ray.get(get_multi_lora_controller().active_adapters.remote())
-            submission_version = adapters[adapter_name].version if adapter_name in adapters else 0
-        except Exception:
-            pass
+        submission_version = await slot_version_cache.get(adapter_name)
+
+    if submission_version is not None:
+        for s in group:
+            s.metadata["slot_version"] = submission_version
 
     result = await generate_fn(args, group, sampling_params)
 
@@ -228,7 +195,6 @@ async def generate_rollout_multi_lora_async(
     # current version is read through a short-TTL cache so a long drain doesn't
     # compare against a stale snapshot.
     max_staleness = getattr(args, "max_weight_staleness", None)
-    version_cache = _AdapterVersionCache()
 
     data: list[list[Sample]] = []
     stale_recycled = 0
@@ -237,10 +203,10 @@ async def generate_rollout_multi_lora_async(
     last_progress = start_time
     while len(data) < target_data_size:
         made_progress = False
-        active_names, current_versions = await version_cache.get()
+        current_versions = await slot_version_cache.get_all()
         for group in worker.get_completed_groups():
             adapter_name = group[0].adapter.name if group and group[0].adapter else None
-            if adapter_name not in active_names:
+            if adapter_name not in current_versions:
                 # Adapter deregistered; its per-adapter source is gone, so the
                 # group cannot be recycled. Discard.
                 continue

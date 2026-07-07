@@ -5,6 +5,7 @@ module wraps them in a named Ray actor (so library code reaches it via
 ``get_multi_lora_controller()``) and runs the HTTP server out-of-band.
 """
 
+import time
 from functools import cache
 from typing import Any
 
@@ -19,6 +20,32 @@ CONTROLLER_NAMESPACE = "miles"
 @cache
 def get_multi_lora_controller():
     return ray.get_actor(CONTROLLER_NAME, namespace=CONTROLLER_NAMESPACE)
+
+
+class SlotVersionCache:
+    """TTL-cached snapshot of the controller's active adapters -> slot version."""
+
+    def __init__(self, ttl_s: float = 1.0) -> None:
+        self.ttl_s = ttl_s
+        self.versions: dict[str, int] = {}
+        self.last_refresh: float | None = None
+
+    async def get_all(self) -> dict[str, int]:
+        now = time.monotonic()
+        if self.last_refresh is None or now - self.last_refresh >= self.ttl_s:
+            try:
+                adapters = await get_multi_lora_controller().active_adapters.remote()
+                self.versions = {name: adapter.version for name, adapter in adapters.items()}
+                self.last_refresh = now
+            except Exception:
+                pass
+        return self.versions
+
+    async def get(self, adapter_name: str) -> int | None:
+        return (await self.get_all()).get(adapter_name)
+
+
+slot_version_cache = SlotVersionCache()
 
 
 @ray.remote(num_cpus=0)
