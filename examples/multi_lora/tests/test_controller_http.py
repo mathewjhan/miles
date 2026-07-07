@@ -60,7 +60,7 @@ async def test_forward_active_returns_upstream():
     backend, srv = await start_server(upstream_url)
     try:
         async with aiohttp.ClientSession() as s:
-            await s.post(f"http://127.0.0.1:{srv.actual_port}/register_adapter", json={"name": "A"})
+            await s.post(f"http://127.0.0.1:{srv.actual_api_port}/register_adapter", json={"name": "A"})
             rid = make_rid("A")
             status, body = await _post(s, f"http://127.0.0.1:{srv.actual_port}/generate", {"rid": rid, "text": "hi"})
             assert status == 200
@@ -76,13 +76,13 @@ async def test_deregister_mid_flight_dummies():
     backend, srv = await start_server(upstream_url)
     try:
         async with aiohttp.ClientSession() as s:
-            await s.post(f"http://127.0.0.1:{srv.actual_port}/register_adapter", json={"name": "A"})
+            await s.post(f"http://127.0.0.1:{srv.actual_api_port}/register_adapter", json={"name": "A"})
             rid = make_rid("A")
             task = asyncio.create_task(
                 _post(s, f"http://127.0.0.1:{srv.actual_port}/generate", {"rid": rid, "text": "hi"})
             )
             await asyncio.sleep(0.05)  # let it be forwarded/in-flight
-            await s.post(f"http://127.0.0.1:{srv.actual_port}/deregister_adapter", json={"name": "A"})
+            await s.post(f"http://127.0.0.1:{srv.actual_api_port}/deregister_adapter", json={"name": "A"})
             status, body = await task
             assert _is_dummy(body)
             assert body["text"] == ""
@@ -117,13 +117,13 @@ async def test_deregister_aborts_in_flight_requests():
     backend, srv = await start_server(upstream_url)
     try:
         async with aiohttp.ClientSession() as s:
-            await s.post(f"http://127.0.0.1:{srv.actual_port}/register_adapter", json={"name": "A"})
+            await s.post(f"http://127.0.0.1:{srv.actual_api_port}/register_adapter", json={"name": "A"})
             rid = make_rid("A")
             task = asyncio.create_task(
                 _post(s, f"http://127.0.0.1:{srv.actual_port}/generate", {"rid": rid, "text": "hi"})
             )
             await asyncio.sleep(0.05)  # let it be forwarded/in-flight
-            await s.post(f"http://127.0.0.1:{srv.actual_port}/deregister_adapter", json={"name": "A"})
+            await s.post(f"http://127.0.0.1:{srv.actual_api_port}/deregister_adapter", json={"name": "A"})
             await task
         assert aborts == [{"rid": rid}]
     finally:
@@ -156,10 +156,29 @@ async def test_custom_server_subclass_adds_routes():
     backend, srv = await start_server(upstream_url, server_cls=CustomServer)
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get(f"http://127.0.0.1:{srv.actual_port}/custom_status") as resp:
+            async with s.get(f"http://127.0.0.1:{srv.actual_api_port}/custom_status") as resp:
                 body = await resp.json()
                 assert resp.headers.get("X-Custom-Server") == "1"
             assert body == {"custom": True, "active": {}}
+    finally:
+        await stop_server(backend, srv)
+        await upstream_runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_control_routes_only_on_api_listener():
+    """The proxy listener must not serve control routes: a /register_adapter
+    hitting the proxy port is just forwarded upstream like any other path."""
+    upstream_runner, upstream_url = await _start_mock_upstream()
+    backend, srv = await start_server(upstream_url)
+    try:
+        assert srv.actual_port != srv.actual_api_port
+        async with aiohttp.ClientSession() as s:
+            status, body = await _post(
+                s, f"http://127.0.0.1:{srv.actual_port}/register_adapter", {"name": "A"}
+            )
+            assert body.get("text") == "upstream-ok"  # proxied, not handled
+            assert backend.registry.active() == {}
     finally:
         await stop_server(backend, srv)
         await upstream_runner.cleanup()
