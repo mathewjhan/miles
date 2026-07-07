@@ -45,6 +45,34 @@ logger = logging.getLogger(__name__)
 GenerateFn = Callable[..., Any]
 
 
+class _AdapterVersionCache:
+    """Throttled query for the controller's active adapters (names + slot versions).
+
+    Mirrors ``fully_async_rollout._CachedWeightVersion``: a short-TTL cache so the
+    staleness filter sees a reasonably-fresh "current version" without issuing a
+    controller RPC on every drained group. Returns ``(active_names, versions)``.
+    """
+
+    def __init__(self, ttl: float = 1.0) -> None:
+        self._ttl = ttl
+        self._cached: tuple[set[str], dict[str, int]] | None = None
+        self._last_query: float = 0.0
+
+    async def get(self) -> tuple[set[str], dict[str, int]]:
+        now = time.monotonic()
+        if self._cached is not None and (now - self._last_query) < self._ttl:
+            return self._cached
+        try:
+            adapters = await get_multi_lora_controller().active_adapters.remote()
+            active_names = set(adapters.keys())
+            versions = {name: a.version for name, a in adapters.items()}
+            self._cached = (active_names, versions)
+            self._last_query = now
+        except Exception as e:
+            logger.debug(f"Failed to query adapter versions: {e}")
+        return self._cached if self._cached is not None else (set(), {})
+
+
 async def process_group(
     args, group: list[Sample], sampling_params: dict, generate_fn: GenerateFn, data_source
 ) -> list[Sample] | None:
@@ -54,26 +82,40 @@ async def process_group(
     samples, so nothing here stamps it. Returns the completed group if it should
     be trained, or None if it was aborted/dummied (recycled back to
     ``data_source``).
-    """
-    result = await generate_fn(args, group, sampling_params)
 
+    The slot version is stamped at *submission* (before generation), not at
+    completion: the version that generated a group is the one live on the
+    engine when the request was sent. In fully-async, another update can bump
+    the controller version *during* generation; re-querying afterwards would
+    record that newer version and make the group look fresh to the staleness
+    filter even though it was decoded under the older weights.
+    """
     adapter_name = group[0].adapter.name if group and group[0].adapter else None
+    submission_version: int | None = None
     if adapter_name is not None:
         try:
             adapters = ray.get(get_multi_lora_controller().active_adapters.remote())
-            version = adapters[adapter_name].version if adapter_name in adapters else 0
-            for s in result:
-                s.metadata["slot_version"] = version
+            submission_version = adapters[adapter_name].version if adapter_name in adapters else 0
         except Exception:
             pass
+
+    result = await generate_fn(args, group, sampling_params)
+
+    if submission_version is not None:
+        for s in result:
+            s.metadata["slot_version"] = submission_version
 
     if any(s.status == Sample.Status.ABORTED for s in result):
         for s in result:
             s.reset_for_retry()
-        try:
-            data_source.add_samples([result])
-        except Exception as e:
-            logger.warning(f"Failed to recycle aborted group: {e}")
+        # NOTE: re-queuing disabled for now. The per-adapter source is a
+        # read-only RolloutDataSource whose add_samples raises RuntimeError, so
+        # the group is dropped. Switch the source to RolloutDataSourceWithBuffer
+        # and uncomment to recycle aborted groups under fresh weights.
+        # try:
+        #     data_source.add_samples([result])
+        # except Exception as e:
+        #     logger.warning(f"Failed to recycle aborted group: {e}")
         return None
     return result
 
@@ -176,27 +218,58 @@ async def generate_rollout_multi_lora_async(
 
     worker = AsyncMultiLoRAWorker.get_or_create(args, data_source, generate_fn)
 
-    # Read active adapters (names + slot versions). Groups for deregistered
-    # adapters are discarded. Groups whose slot version is too far behind the
-    # current version (stale — generated under old weights) are also discarded.
+    # Staleness filter, mirroring fully_async_rollout: each group is stamped with
+    # the slot version live at submission (process_group), and a group whose
+    # version falls too far behind the controller's current version is dropped
+    # (reset_for_retry). Re-queuing via add_samples is NOT wired up yet — the
+    # per-adapter source is a read-only RolloutDataSource whose add_samples
+    # raises, so for now stale groups are discarded rather than regenerated under
+    # fresh weights. Groups for deregistered adapters are dropped too. The
+    # current version is read through a short-TTL cache so a long drain doesn't
+    # compare against a stale snapshot.
     max_staleness = getattr(args, "max_weight_staleness", None)
-    adapters = await get_multi_lora_controller().active_adapters.remote()
-    active_names = set(adapters.keys())
-    current_versions = {name: a.version for name, a in adapters.items()}
+    version_cache = _AdapterVersionCache()
 
     data: list[list[Sample]] = []
+    stale_recycled = 0
+    staleness_values: list[int] = []
     start_time = time.time()
     last_progress = start_time
     while len(data) < target_data_size:
         made_progress = False
+        active_names, current_versions = await version_cache.get()
         for group in worker.get_completed_groups():
             adapter_name = group[0].adapter.name if group and group[0].adapter else None
             if adapter_name not in active_names:
+                # Adapter deregistered; its per-adapter source is gone, so the
+                # group cannot be recycled. Discard.
                 continue
             if max_staleness is not None:
                 stamped = group[0].metadata.get("slot_version")
-                if stamped is not None and current_versions.get(adapter_name, 0) - stamped > max_staleness:
-                    continue
+                if stamped is not None:
+                    staleness = current_versions.get(adapter_name, 0) - stamped
+                    if staleness > max_staleness:
+                        # Stale group. Re-queuing disabled for now: the
+                        # per-adapter source is a read-only RolloutDataSource
+                        # whose add_samples raises RuntimeError, so the group is
+                        # dropped. To regenerate under fresh weights, switch the
+                        # source to RolloutDataSourceWithBuffer and uncomment the
+                        # add_samples below (guard for cross-thread access — the
+                        # worker pulls get_samples on its own thread).
+                        for s in group:
+                            s.reset_for_retry()
+                        # try:
+                        #     data_source.add_samples([group])
+                        # except Exception as e:
+                        #     logger.warning(f"Failed to recycle stale group: {e}")
+                        stale_recycled += 1
+                        staleness_values.append(staleness)
+                        logger.info(
+                            f"Dropped stale group (adapter={adapter_name}, "
+                            f"stamped={stamped}, current={current_versions.get(adapter_name, 0)}, "
+                            f"staleness={staleness} > max={max_staleness})"
+                        )
+                        continue
             f = call_dynamic_filter(dynamic_filter, args, group)
             if not f.keep:
                 metric_gatherer.on_dynamic_filter_drop(reason=f.reason)
@@ -213,6 +286,14 @@ async def generate_rollout_multi_lora_async(
 
         if len(data) < target_data_size:
             await asyncio.sleep(0.01)
+
+    if stale_recycled or staleness_values:
+        avg_staleness = sum(staleness_values) / len(staleness_values) if staleness_values else 0
+        logger.info(
+            f"Staleness stats: recycled={stale_recycled}, "
+            f"avg_staleness={avg_staleness:.1f}, "
+            f"max_staleness={max(staleness_values) if staleness_values else 0}"
+        )
 
     data = sorted(data, key=lambda g: g[0].index)
 
