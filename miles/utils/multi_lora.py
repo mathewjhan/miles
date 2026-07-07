@@ -229,13 +229,18 @@ class MultiLoRAHTTPServer:
     def actual_port(self) -> int:
         return self.site._server.sockets[0].getsockname()[1] if self.site else self.port
 
+    def create_app(self) -> web.Application:
+        """Override to customize the application itself (e.g. middlewares for
+        auth); ``start`` adds routes after this returns."""
+        return web.Application()
+
     def add_routes(self, app: web.Application) -> None:
         app.router.add_post("/register_adapter", self.register_handler)
         app.router.add_post("/deregister_adapter", self.deregister_handler)
         app.router.add_get("/active_adapters", self.active_handler)
 
     async def start(self) -> None:
-        app = web.Application()
+        app = self.create_app()
         self.add_routes(app)
         app.router.add_resource("/{tail:.*}").add_route("*", self.proxy_handler)
         self.runner = web.AppRunner(app)
