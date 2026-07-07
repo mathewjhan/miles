@@ -1,6 +1,6 @@
 """Multi-LoRA Ray actor + named-actor lookup.
 
-The controller logic + HTTP server live in ``miles.multi_lora`` (no Ray). This
+The adapter registry + HTTP server live in ``miles.utils.multi_lora`` (no Ray). This
 module wraps them in a named Ray actor (so library code reaches it via
 ``get_multi_lora_controller()``) and runs the HTTP server out-of-band.
 """
@@ -11,7 +11,8 @@ from typing import Any
 
 import ray
 
-from miles.utils.multi_lora import MultiLoRAControllerLogic, MultiLoRAHTTPServer
+from miles.utils.misc import load_function
+from miles.utils.multi_lora import MultiLoRABackend, MultiLoRAHTTPServer
 
 CONTROLLER_NAME = "miles_multi_lora_controller"
 CONTROLLER_NAMESPACE = "miles"
@@ -48,37 +49,48 @@ class SlotVersionCache:
 slot_version_cache = SlotVersionCache()
 
 
+def _load_subclass(path: str | None, base_cls):
+    if not path:
+        return base_cls
+    cls = load_function(path)
+    assert issubclass(cls, base_cls), f"{path} must point to a {base_cls.__name__} subclass, got {cls}"
+    return cls
+
+
 @ray.remote(num_cpus=0)
-class MultiLoRAAsyncController:
+class MultiLoRAController:
     def __init__(self, args, upstream_url: str, host: str = "0.0.0.0", port: int = 0) -> None:
-        self.logic = MultiLoRAControllerLogic(args.multi_lora_n_adapters)
-        self.server = MultiLoRAHTTPServer(self.logic, upstream_url, host, port)
+        backend_cls = _load_subclass(getattr(args, "multi_lora_backend_path", None), MultiLoRABackend)
+        server_cls = _load_subclass(getattr(args, "multi_lora_http_server_path", None), MultiLoRAHTTPServer)
+        self.backend = backend_cls(args.multi_lora_n_adapters, upstream_url)
+        self.server = server_cls(self.backend, host, port)
 
     async def start(self) -> int:
+        await self.backend.init()
         await self.server.start()
         return self.server.actual_port
 
     async def stop(self) -> None:
         await self.server.stop()
+        await self.backend.close()
 
-    def register_adapter(self, name: str, config: Any) -> dict:
-        return self.logic.register_adapter(name, config)
+    async def register_adapter(self, name: str, config: Any) -> dict:
+        return await self.backend.register(name, config)
 
     async def deregister_adapter(self, name: str) -> None:
-        self.logic.deregister_adapter(name)
-        await self.server.abort_adapter_requests(name)
+        await self.backend.deregister(name)
 
     def free_slot(self, name: str) -> int:
-        return self.logic.free_slot(name)
+        return self.backend.registry.free_slot(name)
 
     def increment_slot_version(self, name: str) -> None:
-        self.logic.increment_slot_version(name)
+        self.backend.registry.increment_version(name)
 
     def active_adapters(self) -> dict:
-        return self.logic.active_adapters()
+        return self.backend.registry.active_adapters()
 
     def active(self) -> dict:
-        return self.logic.active()
+        return self.backend.registry.active()
 
     def http_host(self) -> str:
         return self.server.host
@@ -88,6 +100,6 @@ class MultiLoRAAsyncController:
 
 
 def create_controller(args, upstream_url: str, host: str = "0.0.0.0", port: int = 0):
-    return MultiLoRAAsyncController.options(
+    return MultiLoRAController.options(
         name=CONTROLLER_NAME, namespace=CONTROLLER_NAMESPACE
     ).remote(args, upstream_url, host, port)

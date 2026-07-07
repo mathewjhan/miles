@@ -1243,6 +1243,24 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="When no adapter is RUNNING, the trainer polls for new registrations every this many seconds (default: 5.0)",
             )
             parser.add_argument(
+                "--multi-lora-http-server-path",
+                type=str,
+                default=None,
+                help=(
+                    "Dotted path to a MultiLoRAHTTPServer subclass to use for the multi-LoRA "
+                    "controller's HTTP server (default: MultiLoRAHTTPServer)"
+                ),
+            )
+            parser.add_argument(
+                "--multi-lora-backend-path",
+                type=str,
+                default=None,
+                help=(
+                    "Dotted path to a MultiLoRABackend subclass for the multi-LoRA controller, "
+                    "e.g. to add custom adapter validation via validate_adapter (default: MultiLoRABackend)"
+                ),
+            )
+            parser.add_argument(
                 "--multi-lora-disable-service-mode",
                 action="store_false",
                 dest="multi_lora_service_mode",
