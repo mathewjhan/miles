@@ -1,8 +1,11 @@
+import logging
 from argparse import Namespace
 from collections.abc import Callable
 from typing import Protocol
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 from miles.backends.training_utils.cp_utils import (
     all_gather_with_cp,
@@ -306,6 +309,7 @@ def policy_loss_function(
     train_scored_log_probs = old_log_probs
     train_rollout_logprob_abs_diff = None
     train_rollout_kl = None
+    per_sample_diffs = None
     if "rollout_log_probs" in batch and batch["rollout_log_probs"]:
         rollout_log_probs = torch.cat(batch["rollout_log_probs"], dim=0)
         abs_diff = (train_scored_log_probs - rollout_log_probs).abs()
@@ -315,6 +319,9 @@ def policy_loss_function(
             abs_diff.new_zeros(()),
         )
         train_rollout_logprob_abs_diff = sum_of_sample_mean(abs_diff)
+
+        # Per-sample mean diff (response tokens only) for quantile metrics.
+        per_sample_diffs = (abs_diff * active_tokens).sum(dim=-1) / active_tokens.sum(dim=-1).clamp(min=1)
 
         # KL(rollout || train) at sampled tokens via Schulman k3 with per-token clamp [-10, 10]
         rollout_train_kl = compute_approx_kl(rollout_log_probs, train_scored_log_probs, kl_loss_type="low_var_kl")
@@ -338,6 +345,24 @@ def policy_loss_function(
         reported_loss["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff.clone().detach()
     if train_rollout_kl is not None:
         reported_loss["train_rollout_kl"] = train_rollout_kl.clone().detach()
+
+    if per_sample_diffs is not None:
+        # Bin per-token diff by position within the response (4 quarters).
+        # If q1 >> q4 → frontloaded (early tokens generated under old weights,
+        # in_place upsert happened mid-generation). If uniform → consistently stale.
+        num_bins = 4
+        bin_means = [[] for _ in range(num_bins)]
+        for i in range(abs_diff.shape[0]):
+            response_diffs = abs_diff[i][active_tokens[i]]
+            n = response_diffs.numel()
+            if n < num_bins:
+                continue
+            chunks = torch.chunk(response_diffs, num_bins)
+            for j, chunk in enumerate(chunks):
+                bin_means[j].append(chunk.mean().item())
+        for j in range(num_bins):
+            if bin_means[j]:
+                reported_loss[f"train_rollout_logprob_abs_diff_q{j+1}"] = sum(bin_means[j]) / len(bin_means[j])
 
     if args.use_kl_loss:
         reported_loss["kl_loss"] = kl_loss.clone().detach()
