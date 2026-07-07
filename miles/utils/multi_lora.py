@@ -111,13 +111,9 @@ class AdapterRegistry:
 
 class MultiLoRABackend:
     """Shared brain behind the Ray actor and the HTTP server: adapter registry,
-    in-flight rid tracking, request gating, and engine-facing abort. Both
-    transports delegate here, so operations like deregister-with-abort have a
-    single implementation.
-
-    Subclass and override ``validate_adapter`` to reject registrations (raise
-    ``ValueError``); wire the subclass via ``--multi-lora-backend-path``.
-    """
+    in-flight rid tracking, request gating, and engine-facing abort. Subclass
+    (``--multi-lora-backend-path``) and override ``validate_adapter`` to
+    reject registrations."""
 
     def __init__(self, max_adapters: int, upstream_url: str) -> None:
         self.registry = AdapterRegistry(max_adapters)
@@ -126,8 +122,7 @@ class MultiLoRABackend:
         self.client: httpx.AsyncClient | None = None
 
     async def init(self) -> None:
-        # No timeout: generate requests proxied upstream run for minutes.
-        # Generous connection limit: every rollout request flows through here.
+        # No timeout: proxied generate requests run for minutes.
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(None),
             limits=httpx.Limits(max_connections=4096, max_keepalive_connections=1024),
@@ -177,10 +172,9 @@ class MultiLoRABackend:
         return []
 
     async def abort_adapter_requests(self, adapter_name: str) -> None:
-        """Abort the adapter's in-flight requests on all workers, by exact rid:
-        the engine drops aborts whose rid is not a known request, so a prefix
-        rid would be silently ignored — and for the same reason, posting a rid
-        to workers that don't own it is a harmless no-op."""
+        """Abort by exact rid on every worker: the engine drops aborts for
+        unknown rids, so prefix rids are ignored and wrong-worker posts are
+        harmless no-ops."""
         rids = [rid for rid, name in self.in_flight.items() if name == adapter_name]
         if not rids:
             return
@@ -214,17 +208,10 @@ def extract_rid(body: bytes) -> str | None:
 
 
 class MultiLoRAHTTPServer:
-    """HTTP transport over a ``MultiLoRABackend``: control endpoints plus the
-    catch-all proxy. FastAPI app served by an embedded uvicorn on the caller's
-    event loop, so it can be smoke-tested with a mock upstream (no Ray).
-
-    Subclass and override ``add_routes`` (calling ``super().add_routes(app)``)
-    to expose custom endpoints — pydantic schemas, ``Depends``-based auth, and
-    ``HTTPException`` error shaping all work as in any FastAPI app. The
-    catch-all proxy route is always registered after ``add_routes`` so custom
-    routes take precedence. Override ``create_app`` to customize the app
-    itself (e.g. middlewares).
-    """
+    """FastAPI transport over a ``MultiLoRABackend``: control endpoints plus a
+    catch-all proxy, served by an embedded uvicorn. Subclasses override
+    ``add_routes`` (custom routes take precedence over the catch-all proxy)
+    and ``create_app`` (e.g. middlewares)."""
 
     def __init__(self, backend, host="127.0.0.1", port=0):
         self.backend = backend
@@ -240,8 +227,6 @@ class MultiLoRAHTTPServer:
         return self.port
 
     def create_app(self) -> FastAPI:
-        """Override to customize the application itself (e.g. middlewares for
-        auth); ``start`` adds routes after this returns."""
         return FastAPI(title="Miles Multi-LoRA Controller")
 
     def add_routes(self, app: FastAPI) -> None:
@@ -252,14 +237,13 @@ class MultiLoRAHTTPServer:
     async def start(self) -> None:
         app = self.create_app()
         self.add_routes(app)
-        # Catch-all proxy is registered last so explicit routes take precedence.
         app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])(self.proxy_handler)
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning", access_log=False)
         self.server = uvicorn.Server(config)
         self.serve_task = asyncio.create_task(self.server.serve())
         while not self.server.started:
             if self.serve_task.done():
-                self.serve_task.result()  # surface startup errors
+                self.serve_task.result()
                 raise RuntimeError("uvicorn exited before startup completed")
             await asyncio.sleep(0.01)
 
