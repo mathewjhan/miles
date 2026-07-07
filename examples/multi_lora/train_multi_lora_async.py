@@ -70,11 +70,11 @@ async def main(args):
     while True:
         active = await get_multi_lora_controller().active_adapters.remote()
         if not active:
-            if getattr(args, "multi_lora_disable_service_mode", False):
+            if not args.multi_lora_service_mode:
                 logger.info("No active adapters; exiting.")
                 break
-            logger.info("No active adapters; sleeping for 5s...")
-            await asyncio.sleep(getattr(args, "multi_lora_idle_poll_s", 5.0))
+            logger.info(f"No active adapters; sleeping for {args.multi_lora_idle_poll_s}s...")
+            await asyncio.sleep(args.multi_lora_idle_poll_s)
             continue
 
         # Reconcile (load new + cleanup gone) then upsert BEFORE generate, so the
