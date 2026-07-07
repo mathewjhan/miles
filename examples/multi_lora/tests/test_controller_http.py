@@ -134,12 +134,23 @@ async def test_deregister_aborts_in_flight_requests():
 @pytest.mark.asyncio
 async def test_custom_server_subclass_adds_routes():
     class CustomServer(MultiLoRAHTTPServer):
+        def create_app(self):
+            app = super().create_app()
+
+            @app.middleware("http")
+            async def tag_response(request, call_next):
+                response = await call_next(request)
+                response.headers["X-Custom-Server"] = "1"
+                return response
+
+            return app
+
         def add_routes(self, app):
             super().add_routes(app)
-            app.router.add_get("/custom_status", self.custom_status)
+            app.get("/custom_status")(self.custom_status)
 
-        async def custom_status(self, request):
-            return web.json_response({"custom": True, "active": self.backend.registry.active()})
+        async def custom_status(self):
+            return {"custom": True, "active": self.backend.registry.active()}
 
     upstream_runner, upstream_url = await _start_mock_upstream()
     backend, srv = await start_server(upstream_url, server_cls=CustomServer)
@@ -147,7 +158,7 @@ async def test_custom_server_subclass_adds_routes():
         async with aiohttp.ClientSession() as s:
             async with s.get(f"http://127.0.0.1:{srv.actual_port}/custom_status") as resp:
                 body = await resp.json()
-            # served by the subclass route, not proxied to the mock upstream
+                assert resp.headers.get("X-Custom-Server") == "1"
             assert body == {"custom": True, "active": {}}
     finally:
         await stop_server(backend, srv)
