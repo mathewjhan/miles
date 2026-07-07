@@ -105,9 +105,9 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     provider.finalize()
 
     if getattr(args, "multi_lora", False):
-        from miles.backends.megatron_utils.multi_lora_utils import create_multi_lora
+        from miles.backends.megatron_utils.multi_lora_utils import create_multi_lora_instance
 
-        lora = create_multi_lora(args)
+        lora = create_multi_lora_instance(args)
     else:
         lora = create_lora_instance(args)
 

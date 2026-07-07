@@ -20,7 +20,7 @@ def is_multi_lora_enabled(args: Namespace) -> bool:
     return getattr(args, "multi_lora", False)
 
 
-def create_multi_lora(args: Namespace):
+def create_multi_lora_instance(args: Namespace):
     """Create a MultiLoRA instance from training args."""
     from megatron.bridge.peft.multi_lora import MultiLoRA
 

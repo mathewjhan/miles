@@ -11,7 +11,7 @@ from typing import Any
 
 import ray
 
-from miles.utils.misc import load_function
+from miles.utils.misc import SingletonMeta, load_function
 from miles.utils.multi_lora import MultiLoRABackend, MultiLoRAHTTPServer
 
 CONTROLLER_NAME = "miles_multi_lora_controller"
@@ -23,7 +23,7 @@ def get_multi_lora_controller():
     return ray.get_actor(CONTROLLER_NAME, namespace=CONTROLLER_NAMESPACE)
 
 
-class SlotVersionCache:
+class SlotVersionCache(metaclass=SingletonMeta):
     """TTL-cached snapshot of the controller's active adapters -> slot version."""
 
     def __init__(self, ttl_s: float = 1.0) -> None:
@@ -45,8 +45,6 @@ class SlotVersionCache:
     async def get(self, adapter_name: str) -> int | None:
         return (await self.get_all()).get(adapter_name)
 
-
-slot_version_cache = SlotVersionCache()
 
 
 def _load_subclass(path: str | None, base_cls):
