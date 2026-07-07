@@ -8,10 +8,23 @@ from aiohttp import web
 import pytest
 
 from miles.utils.multi_lora import (
-    MultiLoRAControllerLogic,
+    MultiLoRABackend,
     MultiLoRAHTTPServer,
     make_rid,
 )
+
+
+async def start_server(upstream_url: str, server_cls=MultiLoRAHTTPServer) -> tuple[MultiLoRABackend, MultiLoRAHTTPServer]:
+    backend = MultiLoRABackend(4, upstream_url)
+    srv = server_cls(backend)
+    await backend.init()
+    await srv.start()
+    return backend, srv
+
+
+async def stop_server(backend: MultiLoRABackend, srv: MultiLoRAHTTPServer) -> None:
+    await srv.stop()
+    await backend.close()
 
 
 def _is_dummy(body: dict) -> bool:
@@ -44,9 +57,7 @@ async def _post(session, url, payload):
 @pytest.mark.asyncio
 async def test_forward_active_returns_upstream():
     upstream_runner, upstream_url = await _start_mock_upstream()
-    logic = MultiLoRAControllerLogic(max_adapters=4)
-    srv = MultiLoRAHTTPServer(logic, upstream_url)
-    await srv.start()
+    backend, srv = await start_server(upstream_url)
     try:
         async with aiohttp.ClientSession() as s:
             await s.post(f"http://127.0.0.1:{srv.actual_port}/register_adapter", json={"name": "A"})
@@ -55,16 +66,14 @@ async def test_forward_active_returns_upstream():
             assert status == 200
             assert body["text"] == "upstream-ok"
     finally:
-        await srv.stop()
+        await stop_server(backend, srv)
         await upstream_runner.cleanup()
 
 
 @pytest.mark.asyncio
 async def test_deregister_mid_flight_dummies():
     upstream_runner, upstream_url = await _start_mock_upstream(delay=0.2)
-    logic = MultiLoRAControllerLogic(max_adapters=4)
-    srv = MultiLoRAHTTPServer(logic, upstream_url)
-    await srv.start()
+    backend, srv = await start_server(upstream_url)
     try:
         async with aiohttp.ClientSession() as s:
             await s.post(f"http://127.0.0.1:{srv.actual_port}/register_adapter", json={"name": "A"})
@@ -78,7 +87,7 @@ async def test_deregister_mid_flight_dummies():
             assert _is_dummy(body)
             assert body["text"] == ""
     finally:
-        await srv.stop()
+        await stop_server(backend, srv)
         await upstream_runner.cleanup()
 
 
@@ -105,9 +114,7 @@ async def test_deregister_aborts_in_flight_requests():
     upstream_url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
     worker_urls.append(upstream_url)
 
-    logic = MultiLoRAControllerLogic(max_adapters=4)
-    srv = MultiLoRAHTTPServer(logic, upstream_url)
-    await srv.start()
+    backend, srv = await start_server(upstream_url)
     try:
         async with aiohttp.ClientSession() as s:
             await s.post(f"http://127.0.0.1:{srv.actual_port}/register_adapter", json={"name": "A"})
@@ -120,21 +127,42 @@ async def test_deregister_aborts_in_flight_requests():
             await task
         assert aborts == [{"rid": rid}]
     finally:
-        await srv.stop()
+        await stop_server(backend, srv)
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_custom_server_subclass_adds_routes():
+    class CustomServer(MultiLoRAHTTPServer):
+        def add_routes(self, app):
+            super().add_routes(app)
+            app.router.add_get("/custom_status", self.custom_status)
+
+        async def custom_status(self, request):
+            return web.json_response({"custom": True, "active": self.backend.registry.active()})
+
+    upstream_runner, upstream_url = await _start_mock_upstream()
+    backend, srv = await start_server(upstream_url, server_cls=CustomServer)
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"http://127.0.0.1:{srv.actual_port}/custom_status") as resp:
+                body = await resp.json()
+            # served by the subclass route, not proxied to the mock upstream
+            assert body == {"custom": True, "active": {}}
+    finally:
+        await stop_server(backend, srv)
+        await upstream_runner.cleanup()
 
 
 @pytest.mark.asyncio
 async def test_block_retired_adapter():
     upstream_runner, upstream_url = await _start_mock_upstream()
-    logic = MultiLoRAControllerLogic(max_adapters=4)
-    srv = MultiLoRAHTTPServer(logic, upstream_url)
-    await srv.start()
+    backend, srv = await start_server(upstream_url)
     try:
         async with aiohttp.ClientSession() as s:
             rid = make_rid("A")  # never registered
             status, body = await _post(s, f"http://127.0.0.1:{srv.actual_port}/generate", {"rid": rid, "text": "hi"})
             assert _is_dummy(body)  # blocked, not forwarded
     finally:
-        await srv.stop()
+        await stop_server(backend, srv)
         await upstream_runner.cleanup()
