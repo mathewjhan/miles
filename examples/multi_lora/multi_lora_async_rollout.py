@@ -155,15 +155,6 @@ class AsyncMultiLoRAWorker:
         if result is not None:
             self.output_queue.put(result)
 
-    def get_completed_groups(self) -> list[list[Sample]]:
-        out = []
-        while True:
-            try:
-                out.append(self.output_queue.get_nowait())
-            except queue.Empty:
-                break
-        return out
-
     def queue_size(self) -> int:
         return self.output_queue.qsize()
 
@@ -205,7 +196,13 @@ async def generate_rollout_multi_lora_async(
     while len(data) < target_data_size:
         made_progress = False
         current_versions = await SlotVersionCache().get_all()
-        for group in worker.get_completed_groups():
+        # Pop one group at a time so the queue keeps anything beyond what this
+        # batch needs; a bulk snapshot would discard the surplus.
+        while len(data) < target_data_size:
+            try:
+                group = worker.output_queue.get_nowait()
+            except queue.Empty:
+                break
             adapter_name = group[0].adapter.name if group and group[0].adapter else None
             if adapter_name not in current_versions:
                 # Adapter deregistered; its per-adapter source is gone, so the
@@ -241,9 +238,8 @@ async def generate_rollout_multi_lora_async(
             if not f.keep:
                 metric_gatherer.on_dynamic_filter_drop(reason=f.reason)
                 continue
-            if len(data) < target_data_size:
-                data.append(group)
-                made_progress = True
+            data.append(group)
+            made_progress = True
 
         if made_progress:
             last_progress = time.time()
