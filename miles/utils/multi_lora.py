@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -55,86 +56,127 @@ def parse_adapter(rid: str) -> str:
     return rid.rsplit(RID_SEPARATOR, 1)[0]
 
 
+@dataclass
+class AdapterRecord:
+    name: str
+    slot: int
+    config: Any
+    step: int = 0
+
+
+# Retained batch records, bounding leakage from cycles that crash before
+# mark_batch_trained.
+MAX_BATCH_RECORDS = 16
+
+
 class AdapterRegistry:
-    """Adapter lifecycle: slot allocation, configs, per-adapter weight versions,
-    and deferred cleanup of freed slots."""
+    """Adapter lifecycle around three sets and per-slot monotonic counters.
+
+    ``pending``: registered, weights not yet synced — invisible to generation.
+    ``active``: weights synced at least once — sampleable. Promotion happens in
+    ``record_weight_update``, i.e. exactly when a weight push made it true.
+    ``cleanup``: deregistered, record retained until the trainer saves the final
+    checkpoint and calls ``free_slot``.
+
+    ``slot_counters`` never reset, even across slot reuse, so a (slot, counter)
+    pair never recurs: staleness deltas count this adapter's own pushes, and
+    radix-cache salts can never collide with an earlier tenant's."""
 
     def __init__(self, max_adapters: int) -> None:
         self.max_adapters = max_adapters
         self.free_slots: set[int] = set(range(max_adapters))
-        self.slots: dict[str, int] = {}
-        self.configs: dict[str, Any] = {}
-        self.pending_cleanup: dict[str, int] = {}
-        # Globally monotonic weight version: bumped once per update cycle and
-        # stamped onto every active adapter, so a (name, version) pair is never
-        # reused across re-registrations (radix-cache salt uniqueness).
-        self.weight_version = 0
-        self.slot_versions: dict[str, int] = {}
-        self.step_counts: dict[str, int] = {}
+        self.slot_counters: list[int] = [0] * max_adapters
+        self.pending: dict[str, AdapterRecord] = {}
+        self.active: dict[str, AdapterRecord] = {}
+        self.cleanup: dict[str, AdapterRecord] = {}
+        self.batch_adapters: dict[int, list[str]] = {}
+
+    def find(self, name: str) -> AdapterRecord | None:
+        return self.active.get(name) or self.pending.get(name) or self.cleanup.get(name)
 
     def is_active(self, name: str) -> bool:
-        return name in self.slots
+        return name in self.active
 
     def register(self, name: str, config: Any) -> dict:
         if RID_SEPARATOR in name:
             raise ValueError(f"Adapter name '{name}' must not contain '{RID_SEPARATOR}'")
-        if name in self.slots:
+        if name in self.pending or name in self.active:
             raise ValueError(f"Adapter '{name}' already registered")
+        if name in self.cleanup:
+            raise ValueError(f"Adapter '{name}' is still cleaning up; retry shortly")
         if not self.free_slots:
             raise RuntimeError(f"No free adapter slots (max {self.max_adapters})")
         slot = min(self.free_slots)
         self.free_slots.remove(slot)
-        self.slots[name] = slot
-        self.configs[name] = config
-        self.slot_versions[name] = self.weight_version
+        self.pending[name] = AdapterRecord(name=name, slot=slot, config=config)
         return {"name": name, "slot": slot}
 
     def deregister(self, name: str) -> None:
-        slot = self.slots.pop(name, None)
-        self.configs.pop(name, None)
-        if slot is not None:
-            self.pending_cleanup[name] = slot
+        record = self.active.pop(name, None) or self.pending.pop(name, None)
+        if record is not None:
+            self.cleanup[name] = record
 
     def free_slot(self, name: str) -> int:
-        slot = self.pending_cleanup.pop(name, None)
-        if slot is not None:
-            self.free_slots.add(slot)
-        self.slot_versions.pop(name, None)
-        self.step_counts.pop(name, None)
-        return slot if slot is not None else -1
+        record = self.cleanup.pop(name, None)
+        if record is None:
+            return -1
+        self.free_slots.add(record.slot)
+        return record.slot
 
-    def increment_weight_version(self) -> int:
-        self.weight_version += 1
-        for name in self.slots:
-            self.slot_versions[name] = self.weight_version
-        return self.weight_version
-
-    def increment_steps(self, names: list[str]) -> None:
+    def record_weight_update(self, names: list[str]) -> None:
+        """Weights for these adapters were pushed to the engines: bump their
+        slot counters and promote any pending ones to active."""
         for name in names:
-            if name in self.slots:
-                self.step_counts[name] = self.step_counts.get(name, 0) + 1
+            record = self.find(name)
+            if record is None:
+                continue
+            self.slot_counters[record.slot] += 1
+            if name in self.pending:
+                self.active[name] = self.pending.pop(name)
+
+    def record_batch_adapters(self, rollout_id: int, names: list[str]) -> None:
+        self.batch_adapters[rollout_id] = list(names)
+        while len(self.batch_adapters) > MAX_BATCH_RECORDS:
+            self.batch_adapters.pop(next(iter(self.batch_adapters)))
+
+    def mark_batch_trained(self, rollout_id: int) -> list[str]:
+        trained = []
+        for name in self.batch_adapters.pop(rollout_id, []):
+            record = self.active.get(name) or self.cleanup.get(name)
+            if record is not None:
+                record.step += 1
+                trained.append(name)
+        return trained
 
     def set_step(self, name: str, step: int) -> None:
-        if name in self.slots:
-            self.step_counts[name] = step
+        if (record := self.find(name)) is not None:
+            record.step = step
 
     def step_count(self, name: str) -> int:
-        return self.step_counts.get(name, 0)
+        record = self.find(name)
+        return record.step if record is not None else 0
+
+    def view(self, record: AdapterRecord) -> RegisteredAdapter:
+        return RegisteredAdapter(
+            name=record.name,
+            config=record.config,
+            slot=record.slot,
+            version=self.slot_counters[record.slot],
+            step=record.step,
+        )
 
     def active_adapters(self) -> dict[str, RegisteredAdapter]:
+        return {name: self.view(record) for name, record in self.active.items()}
+
+    def snapshot(self) -> dict:
+        """Atomic view of all three sets, in the registry's own vocabulary.
+        The trainer loads pending + active and cleans up cleanup."""
         return {
-            name: RegisteredAdapter(
-                name,
-                self.configs[name],
-                slot,
-                self.slot_versions.get(name, 0),
-                self.step_counts.get(name, 0),
-            )
-            for name, slot in self.slots.items()
+            "pending": {name: self.view(record) for name, record in self.pending.items()},
+            "active": {name: self.view(record) for name, record in self.active.items()},
+            "cleanup": list(self.cleanup),
         }
 
-    def active(self) -> dict[str, int]:
-        return dict(self.slots)
 
 
 class MultiLoRABackend:
@@ -313,15 +355,18 @@ class MultiLoRAHTTPServer:
     async def register_handler(self, request: Request):
         body = await request.json()
         result = await self.backend.register(body["name"], body.get("config"))
-        return {"ok": True, **result, "active": self.backend.registry.active()}
+        return {"ok": True, **result, "active": self.active_slots()}
 
     async def deregister_handler(self, request: Request):
         body = await request.json()
         await self.backend.deregister(body["name"])
-        return {"ok": True, "active": self.backend.registry.active()}
+        return {"ok": True, "active": self.active_slots()}
+
+    def active_slots(self) -> dict[str, int]:
+        return {name: adapter.slot for name, adapter in self.backend.registry.active_adapters().items()}
 
     async def active_handler(self):
-        return self.backend.registry.active()
+        return self.active_slots()
 
     async def proxy_handler(self, request: Request):
         body = await request.body()

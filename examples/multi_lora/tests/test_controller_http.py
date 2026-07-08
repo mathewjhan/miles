@@ -47,7 +47,10 @@ class ControllerHarness:
             return resp.status, await resp.json()
 
     async def register(self, name: str) -> tuple[int, dict]:
-        return await self.api_post("/register_adapter", {"name": name})
+        status, body = await self.api_post("/register_adapter", {"name": name})
+        # Registered adapters start pending; a weight push promotes them.
+        self.backend.registry.record_weight_update([name])
+        return status, body
 
     async def deregister(self, name: str) -> tuple[int, dict]:
         return await self.api_post("/deregister_adapter", {"name": name})
@@ -142,7 +145,7 @@ async def test_control_routes_only_on_api_listener():
         assert ctl.srv.actual_port != ctl.srv.actual_api_port
         _, body = await ctl.proxy_post("/register_adapter", {"name": "A"})
         assert body.get("text") == "upstream-ok"
-        assert ctl.backend.registry.active() == {}
+        assert ctl.backend.registry.active_adapters() == {}
 
 
 @pytest.mark.asyncio
@@ -164,7 +167,7 @@ async def test_custom_server_subclass_adds_routes():
             app.get("/custom_status")(self.custom_status)
 
         async def custom_status(self):
-            return {"custom": True, "active": self.backend.registry.active()}
+            return {"custom": True, "active": self.active_slots()}
 
     async with running_controller(server_cls=CustomServer) as ctl:
         _, body, headers = await ctl.api_get("/custom_status")

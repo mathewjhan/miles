@@ -35,7 +35,7 @@ from miles.rollout.sglang_rollout import (
 from miles.utils.async_utils import run
 from miles.utils.misc import load_function
 
-from miles.ray.multi_lora_controller import SlotVersionCache
+from miles.ray.multi_lora_controller import SlotVersionCache, get_multi_lora_controller
 
 from miles.utils.types import Sample
 
@@ -262,6 +262,10 @@ async def generate_rollout_multi_lora_async(
         )
 
     data = sorted(data, key=lambda g: g[0].index)
+
+    batch_adapters = sorted({g[0].adapter.name for g in data if g and g[0].adapter})
+    if batch_adapters:
+        await get_multi_lora_controller().record_batch_adapters.remote(rollout_id, batch_adapters)
 
     if (x := args.rollout_sample_filter_path) is not None:
         load_function(x)(args, data)

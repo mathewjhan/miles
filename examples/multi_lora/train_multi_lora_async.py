@@ -68,25 +68,25 @@ async def main(args):
 
     rollout_id = 0
     while True:
-        active = await get_multi_lora_controller().active_adapters.remote()
-        if not active:
+        snapshot = await get_multi_lora_controller().snapshot.remote()
+        if not (snapshot["pending"] or snapshot["active"] or snapshot["cleanup"]):
             if not args.multi_lora_service_mode:
-                logger.info("No active adapters; exiting.")
+                logger.info("No adapters; exiting.")
                 break
-            logger.info(f"No active adapters; sleeping for {args.multi_lora_idle_poll_s}s...")
+            logger.info(f"No adapters; sleeping for {args.multi_lora_idle_poll_s}s...")
             await asyncio.sleep(args.multi_lora_idle_poll_s)
             continue
 
-        # Reconcile (load new + cleanup gone) then upsert BEFORE generate, so the
-        # batch is fetched with loaded = active (batch ⊆ loaded) and SGLang has
-        # the latest weights. Reconcile runs after the previous train (gone
-        # adapters' last batch already trained) and before update_weights.
+        # Reconcile (load active+pending, cleanup deregistered) then push
+        # BEFORE generate. The weight updater reports what it pushed, which
+        # promotes pending adapters to active — only then does the data
+        # source start sampling them.
         await actor_model.reconcile_adapters()
         await actor_model.update_weights()
-        await controller.increment_weight_version.remote()
 
         rollout_data = await rollout_manager.generate.remote(rollout_id)
         await actor_model.train(rollout_id, rollout_data)
+        await controller.mark_batch_trained.remote(rollout_id)
 
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
             await actor_model.save_model(rollout_id, force_sync=False)

@@ -69,6 +69,9 @@ class DistBucketedWeightUpdateMixin:
     ) -> None:
         """Initialize LoRA-specific state. Call from subclass ``__init__``."""
         self.is_lora = is_lora
+        # Multi-LoRA: the loaded-adapter map captured by the actor at reconcile;
+        # set before each update_weights call.
+        self.multi_lora_adapters = None
         if self.is_lora:
             # Distributed LoRA sync requires the bridge iterator
             assert args.megatron_to_hf_mode == "bridge", (
@@ -265,24 +268,27 @@ class DistBucketedWeightUpdateMixin:
         self._lora_loaded = True
 
     def _update_multi_lora_weights(self) -> None:
-        """Refresh every controller-tracked adapter on the rollout engines in place.
+        """Push every adapter the trainer has loaded, then report exactly that
+        set to the controller (bumping slot counters and promoting pending
+        adapters to running).
 
-        Every send uses ``upsert=True``: SGLang registers the adapter on its
-        first send and overwrites it in place on every later send. Adapters are
-        never unloaded, so there is no drain/``wait_for_unload`` and the LoRA
-        usage-counter leak cannot hang the update. The controller returns the
-        same snapshot on every rank, so all ranks walk the adapters in the same
-        order and the per-adapter TP collectives in ``_send_one_multi_lora_adapter``
-        line up; only the source rank issues the engine RPCs / broadcasts.
+        The push set is ``multi_lora_adapters`` — the loaded map the actor
+        captured at reconcile — not a fresh controller query: pushing must
+        cover exactly what is in the Megatron slots, and the loaded map is
+        identical on every rank so the per-adapter TP collectives in
+        ``_send_one_multi_lora_adapter`` line up. Every send uses
+        ``upsert=True``; adapters are never unloaded (no drain, no
+        ``wait_for_unload`` hang).
         """
         from miles.ray.multi_lora_controller import get_multi_lora_controller
 
+        adapters = self.multi_lora_adapters
+        assert adapters is not None, "actor must set multi_lora_adapters before update_weights"
+        for name in sorted(adapters):
+            self._send_one_multi_lora_adapter(adapters[name], upsert=True)
 
-        adapters = ray.get(get_multi_lora_controller().active_adapters.remote())
-        for adapter in adapters.values():
-                # Always upsert: SGLang registers the adapter on first send and
-                # overwrites it in place on every later send.
-                self._send_one_multi_lora_adapter(adapter, upsert=True)
+        if self._is_lora_source and adapters:
+            ray.get(get_multi_lora_controller().record_weight_update.remote(sorted(adapters)))
 
     def _send_one_multi_lora_adapter(self, adapter, upsert: bool) -> None:
         """Export and transmit one adapter's weights.

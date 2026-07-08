@@ -62,6 +62,7 @@ class UpdateWeightFromTensor:
         self.weight_version = 0
         self.is_lora = is_lora
         self.is_multi_lora = is_multi_lora_enabled(args)
+        self.multi_lora_adapters = None
         self._lora_loaded = False
         self._lora_name = LORA_ADAPTER_NAME
 
@@ -317,11 +318,14 @@ class UpdateWeightFromTensor:
           for reuse by the next adapter.
         """
         from miles.ray.multi_lora_controller import get_multi_lora_controller
-        
 
-        adapters = ray.get(get_multi_lora_controller().active_adapters.remote())
-        for adapter in adapters.values():
-                self.send_one_multi_lora_adapter(adapter, upsert=True)
+        adapters = self.multi_lora_adapters
+        assert adapters is not None, "actor must set multi_lora_adapters before update_weights"
+        for name in sorted(adapters):
+            self.send_one_multi_lora_adapter(adapters[name], upsert=True)
+
+        if dist.get_rank() == 0 and adapters:
+            ray.get(get_multi_lora_controller().record_weight_update.remote(sorted(adapters)))
 
     def send_one_multi_lora_adapter(self, adapter, upsert: bool) -> None:
         """Push one adapter's weights to SGLang. ``upsert=True``: SGLang

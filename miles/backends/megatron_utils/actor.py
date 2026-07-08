@@ -441,10 +441,12 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @timer
     def reconcile_adapters(self) -> None:
-        """Reconcile loaded adapters with the controller's active set: load any
-        new, cleanup any gone (save ckpt + clear Megatron slot). Called by the
-        trainer after train / before update_weights. No-op when multi-LoRA is
-        disabled."""
+        """Reconcile loaded adapters with the controller: load anything the
+        controller wants served (active + pending), clean up deregistered ones
+        (save final ckpt + clear Megatron slot + free), and free deregistered
+        adapters that were never loaded. The snapshot is read once on the main
+        rank and broadcast, so every rank reconciles the same set. No-op when
+        multi-LoRA is disabled."""
         if not is_multi_lora_enabled(self.args):
             return
         from miles.backends.megatron_utils.multi_lora_utils import (
@@ -453,20 +455,35 @@ class MegatronTrainRayActor(TrainRayActor):
         )
         from miles.ray.multi_lora_controller import get_multi_lora_controller
 
-        active = ray.get(get_multi_lora_controller().active_adapters.remote())
+        broadcast_buffer = [None]
+        if is_megatron_main_rank():
+            broadcast_buffer[0] = ray.get(get_multi_lora_controller().snapshot.remote())
+        if dist.is_initialized():
+            dist.broadcast_object_list(broadcast_buffer, src=0, group=get_gloo_group())
+        snapshot = broadcast_buffer[0]
+        should_be_loaded = {**snapshot["active"], **snapshot["pending"]}
+        cleanup_names = set(snapshot["cleanup"])
+
         loaded_names = set(self.loaded_adapters)
-        new = [active[n] for n in active if n not in loaded_names]
-        gone = [self.loaded_adapters[n] for n in loaded_names if n not in active]
-        if new:
-            _load_adapters(self.args, self.model, self.optimizer, new)
-            for a in new:
-                self.loaded_adapters[a.name] = a
+        adapters_to_load = [adapter for name, adapter in should_be_loaded.items() if name not in loaded_names]
+        adapters_to_clean_up = [
+            self.loaded_adapters[n] for n in loaded_names if n in cleanup_names or n not in should_be_loaded
+        ]
+        if adapters_to_load:
+            _load_adapters(self.args, self.model, self.optimizer, adapters_to_load)
+            for adapter in adapters_to_load:
+                self.loaded_adapters[adapter.name] = adapter
             self.weights_backuper.backup("actor")
-        if gone:
-            _cleanup_adapters(self.args, self.model, self.optimizer, gone)
-            for a in gone:
-                self.loaded_adapters.pop(a.name, None)
+        if adapters_to_clean_up:
+            _cleanup_adapters(self.args, self.model, self.optimizer, adapters_to_clean_up)
+            for adapter in adapters_to_clean_up:
+                self.loaded_adapters.pop(adapter.name, None)
             self.weights_backuper.backup("actor")
+
+        # Deregistered before ever being loaded: nothing to save or clear.
+        if is_megatron_main_rank():
+            for name in cleanup_names - loaded_names:
+                ray.get(get_multi_lora_controller().free_slot.remote(name))
 
     @timer
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
@@ -536,6 +553,11 @@ class MegatronTrainRayActor(TrainRayActor):
             if self.args.offload_train:
                 destroy_process_groups()
             return
+
+        if is_multi_lora_enabled(self.args):
+            # The push set is the loaded map captured at reconcile, not a fresh
+            # controller query: push must cover exactly what is in the slots.
+            self.weight_updater.multi_lora_adapters = dict(self.loaded_adapters)
 
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
             print_memory("before update_weights")
