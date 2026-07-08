@@ -83,6 +83,11 @@ async def main(args):
         await actor_model.reconcile_adapters()
         await actor_model.update_weights()
 
+        # Reconcile may have cleaned up the last adapters (e.g. num_row reached):
+        # with nothing active, generate would wait forever for a batch.
+        if not await get_multi_lora_controller().active_adapters.remote():
+            continue
+
         rollout_data = await rollout_manager.generate.remote(rollout_id)
         await actor_model.train(rollout_id, rollout_data)
         await controller.mark_batch_trained.remote(rollout_id)
