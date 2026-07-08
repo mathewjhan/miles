@@ -83,8 +83,17 @@ class MultiLoRAController:
     def free_slot(self, name: str) -> int:
         return self.backend.registry.free_slot(name)
 
-    def increment_slot_version(self, name: str) -> None:
-        self.backend.registry.increment_version(name)
+    def increment_weight_version(self) -> int:
+        return self.backend.registry.increment_weight_version()
+
+    def increment_adapter_steps(self, names: list[str]) -> None:
+        self.backend.registry.increment_steps(names)
+
+    def set_adapter_step(self, name: str, step: int) -> None:
+        self.backend.registry.set_step(name, step)
+
+    def adapter_step(self, name: str) -> int:
+        return self.backend.registry.step_count(name)
 
     def active_adapters(self) -> dict:
         return self.backend.registry.active_adapters()

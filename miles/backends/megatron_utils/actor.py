@@ -488,7 +488,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
             controller = get_multi_lora_controller()
             adapters = ray.get(controller.active_adapters.remote())
-            adapter_steps = {name: rollout_id for name in adapters}
+            adapter_steps = {name: adapter.step for name, adapter in adapters.items()}
             save_multi_lora_checkpoints(self.args, self.model, adapter_steps, adapters)
         else:
             save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)

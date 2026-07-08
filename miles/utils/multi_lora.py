@@ -65,7 +65,12 @@ class AdapterRegistry:
         self.slots: dict[str, int] = {}
         self.configs: dict[str, Any] = {}
         self.pending_cleanup: dict[str, int] = {}
+        # Globally monotonic weight version: bumped once per update cycle and
+        # stamped onto every active adapter, so a (name, version) pair is never
+        # reused across re-registrations (radix-cache salt uniqueness).
+        self.weight_version = 0
         self.slot_versions: dict[str, int] = {}
+        self.step_counts: dict[str, int] = {}
 
     def is_active(self, name: str) -> bool:
         return name in self.slots
@@ -81,6 +86,7 @@ class AdapterRegistry:
         self.free_slots.remove(slot)
         self.slots[name] = slot
         self.configs[name] = config
+        self.slot_versions[name] = self.weight_version
         return {"name": name, "slot": slot}
 
     def deregister(self, name: str) -> None:
@@ -94,14 +100,36 @@ class AdapterRegistry:
         if slot is not None:
             self.free_slots.add(slot)
         self.slot_versions.pop(name, None)
+        self.step_counts.pop(name, None)
         return slot if slot is not None else -1
 
-    def increment_version(self, name: str) -> None:
-        self.slot_versions[name] = self.slot_versions.get(name, 0) + 1
+    def increment_weight_version(self) -> int:
+        self.weight_version += 1
+        for name in self.slots:
+            self.slot_versions[name] = self.weight_version
+        return self.weight_version
+
+    def increment_steps(self, names: list[str]) -> None:
+        for name in names:
+            if name in self.slots:
+                self.step_counts[name] = self.step_counts.get(name, 0) + 1
+
+    def set_step(self, name: str, step: int) -> None:
+        if name in self.slots:
+            self.step_counts[name] = step
+
+    def step_count(self, name: str) -> int:
+        return self.step_counts.get(name, 0)
 
     def active_adapters(self) -> dict[str, RegisteredAdapter]:
         return {
-            name: RegisteredAdapter(name, self.configs[name], slot, self.slot_versions.get(name, 0))
+            name: RegisteredAdapter(
+                name,
+                self.configs[name],
+                slot,
+                self.slot_versions.get(name, 0),
+                self.step_counts.get(name, 0),
+            )
             for name, slot in self.slots.items()
         }
 

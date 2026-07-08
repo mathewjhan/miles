@@ -46,6 +46,7 @@ class RegisteredAdapter:
     config: AdapterConfig
     slot: int
     version: int = 0
+    step: int = 0
 
 
 def parse_adapter_yaml(path: Path) -> AdapterConfig:

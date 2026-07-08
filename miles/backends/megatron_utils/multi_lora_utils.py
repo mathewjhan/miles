@@ -239,17 +239,17 @@ def save_multi_lora_checkpoints(
             dist.barrier()
 
 
-def _register_adapter(adapter: RegisteredAdapter, model) -> None:
-    """Install one adapter on this rank's local model shard."""
+def _register_adapter(adapter: RegisteredAdapter, model) -> int:
+    """Install one adapter on this rank's local model shard. Returns the step
+    of the checkpoint it resumed from (0 for a fresh adapter)."""
     from megatron.bridge.peft.multi_lora_layers import init_adapter_slot, load_adapter
-
-    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
 
     name = adapter.name
     config = adapter.config
     slot = adapter.slot
     log_prefix = f"[multilora] ({name})"
 
+    step = 0
     if config.save is not None:
         ckpt_root = config.save / "checkpoints"
         ckpt, step = find_latest_checkpoint(ckpt_root)
@@ -258,6 +258,7 @@ def _register_adapter(adapter: RegisteredAdapter, model) -> None:
 
     if ckpt is None:
         logger.info(f"{log_prefix} no checkpoint, starting from random init")
+        step = 0
     else:
         state_dict = torch.load(ckpt, map_location="cpu", weights_only=True)
         loaded = load_adapter(model, slot, state_dict)
@@ -269,6 +270,7 @@ def _register_adapter(adapter: RegisteredAdapter, model) -> None:
 
     init_adapter_slot(model, slot, rank=config.rank, alpha=config.alpha)
     logger.info(f"{log_prefix} installed at slot {slot}")
+    return step
 
 
 def _deregister_adapter(adapter: RegisteredAdapter, args, model, optimizer) -> None:
@@ -279,10 +281,10 @@ def _deregister_adapter(adapter: RegisteredAdapter, args, model, optimizer) -> N
     slot = adapter.slot
     log_prefix = f"[multilora] ({name})"
 
-    # Save the final checkpoint (no per-adapter step tracking — use 0 as the
-    # iteration tag; the ckpt captures the adapter's final trained state).
-    save_multi_lora_checkpoints(args, model, {name: 0}, {name: adapter})
-    logger.info(f"{log_prefix} saved final checkpoint")
+    # The controller still holds the step count until free_slot runs.
+    step = ray.get(get_multi_lora_controller().adapter_step.remote(name))
+    save_multi_lora_checkpoints(args, model, {name: step}, {name: adapter})
+    logger.info(f"{log_prefix} saved final checkpoint at step {step}")
 
     # Clear out the multilora slot in the multilora layer in the Megatron model
     clear_adapter_slot(model, slot)
@@ -296,20 +298,26 @@ def _deregister_adapter(adapter: RegisteredAdapter, args, model, optimizer) -> N
 
 
 def load_adapters(args, model, optimizer, adapters) -> int:
-    """Load a caller-provided list of adapters into Megatron slots (no controller
-    state machine). Each adapter is a ``RegisteredAdapter`` (name, config, slot).
-    Callers drive this explicitly (no state machine), so callers drive this explicitly."""
+    """Load a caller-provided list of adapters into Megatron slots. Each adapter
+    is a ``RegisteredAdapter`` (name, config, slot). When resuming from a
+    checkpoint, sets the controller's step count to the checkpoint's step."""
+    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
     from miles.utils.distributed_utils import get_gloo_group
 
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
     if not adapters:
         return 0
+    resume_steps: dict[str, int] = {}
     for adapter in adapters:
-        _register_adapter(adapter, model)
+        resume_steps[adapter.name] = _register_adapter(adapter, model)
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
     optimizer.reload_model_params()
+    if is_megatron_main_rank():
+        for name, step in resume_steps.items():
+            if step > 0:
+                ray.get(get_multi_lora_controller().set_adapter_step.remote(name, step))
     return len(adapters)
 
 
