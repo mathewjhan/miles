@@ -1011,6 +1011,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--observe-training-entropy",
+                action="store_true",
+                default=False,
+                help=(
+                    "Compute training entropy as a logged metric even when --entropy-coef is 0. "
+                    "When the coefficient is 0, the observed entropy is detached and does not affect backward."
+                ),
+            )
+            parser.add_argument(
                 "--get-mismatch-metrics",
                 action="store_true",
                 default=False,
@@ -1385,7 +1394,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Log statistics of the category of reward, such as why the reward function considers it as failed. "
-                    "Specify the key in the reward dict using this argument.",
+                    "Specify the key in the reward dict using this argument."
                 ),
             )
             parser.add_argument(
@@ -1587,6 +1596,24 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default="torch",
             )
             parser.add_argument("--check-weight-update-equal", action="store_true")
+            parser.add_argument(
+                "--check-weight-update-selector",
+                type=str,
+                default="all",
+                choices=["all", "target", "draft"],
+                help="Which model the post-update equality check covers: 'all' (target + "
+                "draft/MTP), 'target' (target model only; skips the draft, e.g. when MTP "
+                "training is off), or 'draft' (draft/MTP worker only).",
+            )
+            parser.add_argument(
+                "--check-weight-update-skip-list",
+                type=str,
+                nargs="*",
+                default=None,
+                help="Weight-name substrings to exclude from the post-update equality check; "
+                "their mismatches are downgraded to non-fatal info (e.g. MTP/draft layer names "
+                "that are absent on the training side).",
+            )
             parser.add_argument(
                 "--check-weight-update-allow-quant-error",
                 action="store_true",
@@ -1890,13 +1917,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     fn.add_arguments(parser)
             return parser
 
-        def add_sglang_tp_size():
-            temp_parser = argparse.ArgumentParser(add_help=False)
-            temp_parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
-            temp_args, _ = temp_parser.parse_known_args()
-            sglang_tp_size = temp_args.rollout_num_gpus_per_engine
-            return sglang_tp_size
-
         # Add custom arguments in front to prevent overwritten some miles arguments.
         if add_custom_arguments is not None:
             parser = add_custom_arguments(parser)
@@ -1937,7 +1957,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         )
         reset_arg(parser, "--padded-vocab-size", type=int, default=None)
 
-        parser.set_defaults(sglang_tensor_parallel_size=add_sglang_tp_size())
         return parser
 
     return add_miles_arguments
@@ -2356,13 +2375,16 @@ def miles_validate_args(args):
             args.offload_train = True
         if args.offload_rollout is None:
             args.offload_rollout = True
-        if args.sglang_enforce_piecewise_cuda_graph:
-            logger.warning("Warning: colocate mode with --sglang-enforce-piecewise-cuda-graph may trigger NVLS OOM.")
-        if not args.sglang_disable_piecewise_cuda_graph:
-            args.sglang_disable_piecewise_cuda_graph = True
+        if args.sglang_cuda_graph_backend_prefill is None:
+            args.sglang_cuda_graph_backend_prefill = "disabled"
             logger.info(
-                "Colocate mode: defaulting --sglang-disable-piecewise-cuda-graph to avoid NVLS OOM. "
-                "Use --sglang-enforce-piecewise-cuda-graph to override."
+                "Colocate mode: defaulting --sglang-cuda-graph-backend-prefill=disabled to avoid NVLS OOM. "
+                "Set --sglang-cuda-graph-backend-prefill explicitly to override."
+            )
+        elif args.sglang_cuda_graph_backend_prefill != "disabled":
+            logger.warning(
+                f"Warning: colocate mode with --sglang-cuda-graph-backend-prefill="
+                f"{args.sglang_cuda_graph_backend_prefill} may trigger NVLS OOM."
             )
         if args.rollout_num_gpus != args.actor_num_gpus_per_node * args.actor_num_nodes:
             logger.info(
