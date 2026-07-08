@@ -21,7 +21,6 @@ from miles.ray.placement_group import create_placement_groups, create_rollout_ma
 from miles.utils.adapter_config import parse_adapter_yaml
 from miles.utils.arguments import parse_args
 from miles.utils.logging_utils import configure_logger
-from miles.utils.misc import should_run_periodic_action
 from miles.utils.tracking_utils import init_tracking
 
 from miles.ray.multi_lora_controller import create_controller, get_multi_lora_controller
@@ -42,7 +41,7 @@ async def main(args):
 
     pgs = create_placement_groups(args)
     init_tracking(args)
-    rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
+    rollout_manager, _num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
 
     # Create the controller AFTER the rollout manager (which sets
     # args.sglang_router_ip/port to the Miles Router). The controller proxies
@@ -88,8 +87,9 @@ async def main(args):
         await actor_model.train(rollout_id, rollout_data)
         await controller.mark_batch_trained.remote(rollout_id)
 
-        if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
-            await actor_model.save_model(rollout_id, force_sync=False)
+        # Save cadence is per adapter, decided inside save_model from each
+        # adapter's own step count; deregistration cleanup saves final ckpts.
+        await actor_model.save_model(rollout_id)
 
         rollout_id += 1
 

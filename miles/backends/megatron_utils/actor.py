@@ -2,6 +2,7 @@ import logging
 import random
 import socket
 from argparse import Namespace
+from pathlib import Path
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
@@ -503,10 +504,31 @@ class MegatronTrainRayActor(TrainRayActor):
             from miles.backends.megatron_utils.multi_lora_utils import save_multi_lora_checkpoints
             from miles.ray.multi_lora_controller import get_multi_lora_controller
 
-            controller = get_multi_lora_controller()
-            adapters = ray.get(controller.active_adapters.remote())
-            adapter_steps = {name: adapter.step for name, adapter in adapters.items()}
-            save_multi_lora_checkpoints(self.args, self.model, adapter_steps, adapters)
+            # Per-adapter cadence: called every iteration, saves only adapters
+            # whose step count reached a save-interval multiple and whose
+            # checkpoint for that step doesn't already exist on disk (the
+            # directory is the record of what has been saved). Rank 0 decides
+            # and broadcasts so the collective export lines up on all ranks.
+            due_buffer = [None]
+            if is_megatron_main_rank():
+                adapters = ray.get(get_multi_lora_controller().active_adapters.remote())
+                due_buffer[0] = {
+                    name: adapter
+                    for name, adapter in adapters.items()
+                    if adapter.step > 0
+                    and adapter.step % self.args.save_interval == 0
+                    and adapter.config.save is not None
+                    and not (Path(adapter.config.save) / "checkpoints" / f"step_{adapter.step}").exists()
+                }
+            if dist.is_initialized():
+                dist.broadcast_object_list(due_buffer, src=0, group=get_gloo_group())
+            due_adapters = due_buffer[0]
+            if not due_adapters:
+                if self.args.offload_train:
+                    destroy_process_groups()
+                return
+            adapter_steps = {name: adapter.step for name, adapter in due_adapters.items()}
+            save_multi_lora_checkpoints(self.args, self.model, adapter_steps, due_adapters)
         else:
             save(rollout_id, self.model, self.optimizer, self.opt_param_scheduler)
 
