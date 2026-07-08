@@ -15,15 +15,16 @@ import yaml
 @dataclass(frozen=True)
 class AdapterConfig:
 
-    # resolves them to CLI defaults if None (--lora-rank / --lora-alpha) on register.
-    rank: int | None
-    alpha: int | None
-
     data: str
-    save: str | Path | None
 
-    input_key: str
-    label_key: str
+    # resolves them to CLI defaults if None (--lora-rank / --lora-alpha) on register.
+    rank: int | None = None
+    alpha: int | None = None
+
+    save: str | Path | None = None
+
+    input_key: str = "text"
+    label_key: str | None = None
     metadata_key: str | None = None
 
     rm_type: str | None = None

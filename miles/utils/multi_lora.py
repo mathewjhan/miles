@@ -27,8 +27,9 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 
-from miles.utils.adapter_config import RegisteredAdapter
+from miles.utils.adapter_config import AdapterConfig, RegisteredAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +300,15 @@ def dummy_response_body(rid: str) -> dict:
     }
 
 
+class RegisterRequest(BaseModel):
+    name: str
+    config: AdapterConfig | None = None
+
+
+class DeregisterRequest(BaseModel):
+    name: str
+
+
 def extract_rid(body: bytes) -> str | None:
     if not body:
         return None
@@ -386,21 +396,22 @@ class MultiLoRAHTTPServer:
         self.proxy_server = self.proxy_task = None
         self.api_server = self.api_task = None
 
-    async def register_handler(self, request: Request):
-        body = await request.json()
-        result = await self.backend.register(body["name"], body.get("config"))
+    async def register_handler(self, body: RegisterRequest):
+        result = await self.backend.register(body.name, body.config)
         return {"ok": True, **result, "active": self.active_slots()}
 
-    async def deregister_handler(self, request: Request):
-        body = await request.json()
-        await self.backend.deregister(body["name"])
+    async def deregister_handler(self, body: DeregisterRequest):
+        await self.backend.deregister(body.name)
         return {"ok": True, "active": self.active_slots()}
 
     def active_slots(self) -> dict[str, int]:
         return {name: adapter.slot for name, adapter in self.backend.registry.active_adapters().items()}
 
     async def active_handler(self):
-        return self.active_slots()
+        return {
+            name: {"slot": adapter.slot, "version": adapter.version, "step": adapter.step}
+            for name, adapter in self.backend.registry.active_adapters().items()
+        }
 
     async def proxy_handler(self, request: Request):
         body = await request.body()
