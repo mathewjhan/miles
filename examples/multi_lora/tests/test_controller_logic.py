@@ -79,6 +79,48 @@ def test_swap_a_to_b_independent():
     assert backend.on_response(rid_b) is False
 
 
+def test_weight_version_is_globally_monotonic():
+    registry = AdapterRegistry(max_adapters=2)
+    registry.register("A", None)
+    assert registry.increment_weight_version() == 1
+    registry.register("B", None)  # registered mid-run: stamped with current version
+    assert registry.active_adapters()["A"].version == 1
+    assert registry.active_adapters()["B"].version == 1
+    assert registry.increment_weight_version() == 2
+    registry.deregister("A")
+    registry.free_slot("A")
+    registry.register("A2", None)
+    assert registry.increment_weight_version() == 3  # never resets on slot reuse
+    assert registry.active_adapters()["A2"].version == 3
+
+
+def test_step_counts_per_adapter():
+    registry = AdapterRegistry(max_adapters=2)
+    registry.register("A", None)
+    registry.register("B", None)
+    registry.increment_steps(["A", "B"])
+    registry.increment_steps(["A"])
+    registry.increment_steps(["gone"])  # inactive names ignored
+    assert registry.active_adapters()["A"].step == 2
+    assert registry.active_adapters()["B"].step == 1
+    assert registry.step_count("A") == 2
+
+    registry.deregister("A")
+    assert registry.step_count("A") == 2  # survives until free_slot (final ckpt tag)
+    registry.free_slot("A")
+    assert registry.step_count("A") == 0
+
+
+def test_set_step_on_resume():
+    registry = AdapterRegistry(max_adapters=2)
+    registry.register("A", None)
+    registry.set_step("A", 40)
+    registry.increment_steps(["A"])
+    assert registry.step_count("A") == 41
+    registry.set_step("gone", 10)  # inactive names ignored
+    assert registry.step_count("gone") == 0
+
+
 @pytest.mark.asyncio
 async def test_custom_backend_validation_rejects():
     class StrictBackend(MultiLoRABackend):
