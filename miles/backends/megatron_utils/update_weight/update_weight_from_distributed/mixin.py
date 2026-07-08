@@ -269,7 +269,7 @@ class DistBucketedWeightUpdateMixin:
 
     def _update_multi_lora_weights(self) -> None:
         """Push every adapter the trainer has loaded, then report exactly that
-        set to the controller (bumping slot counters and promoting pending
+        set to the controller (bumping slot versions and promoting pending
         adapters to running).
 
         The push set is ``multi_lora_adapters`` — the loaded map the actor

@@ -56,10 +56,10 @@ def test_snapshot_reports_sets_in_registry_vocabulary():
     assert set(registry.active_adapters()) == {"A"}  # only active adapters are sampleable
 
 
-def test_slot_counter_is_monotonic_across_slot_reuse():
+def test_slot_version_is_monotonic_across_slot_reuse():
     registry = AdapterRegistry(max_adapters=2)
-    register_and_promote(registry, "A")  # slot 0, counter 1
-    registry.record_weight_update(["A"])  # counter 2
+    register_and_promote(registry, "A")  # slot 0, version 1
+    registry.record_weight_update(["A"])  # version 2
     registry.deregister("A")
     registry.free_slot("A")
 

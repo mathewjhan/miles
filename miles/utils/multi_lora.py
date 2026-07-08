@@ -77,7 +77,7 @@ MAX_BATCH_RECORDS = 16
 
 
 class AdapterRegistry:
-    """Adapter lifecycle around three sets and per-slot monotonic counters.
+    """Adapter lifecycle around three sets and per-slot monotonic versions.
 
     ``pending``: registered, weights not yet synced — invisible to generation.
     ``active``: weights synced at least once — sampleable. Promotion happens in
@@ -85,14 +85,15 @@ class AdapterRegistry:
     ``cleanup``: deregistered, record retained until the trainer saves the final
     checkpoint and calls ``free_slot``.
 
-    ``slot_counters`` never reset, even across slot reuse, so a (slot, counter)
-    pair never recurs: staleness deltas count this adapter's own pushes, and
-    radix-cache salts can never collide with an earlier tenant's."""
+    ``slot_versions`` count pushes to the slot and never reset, even across slot
+    reuse (a new tenant continues where the previous one left off), so a
+    (slot, version) pair never recurs: staleness deltas count this adapter's own
+    pushes, and radix-cache salts can never collide with an earlier tenant's."""
 
     def __init__(self, max_adapters: int) -> None:
         self.max_adapters = max_adapters
         self.free_slots: set[int] = set(range(max_adapters))
-        self.slot_counters: list[int] = [0] * max_adapters
+        self.slot_versions: list[int] = [0] * max_adapters
         self.pending: dict[str, AdapterRecord] = {}
         self.active: dict[str, AdapterRecord] = {}
         self.cleanup: dict[str, AdapterRecord] = {}
@@ -141,12 +142,12 @@ class AdapterRegistry:
 
     def record_weight_update(self, names: list[str]) -> None:
         """Weights for these adapters were pushed to the engines: bump their
-        slot counters and promote any pending ones to active."""
+        slot versions and promote any pending ones to active."""
         for name in names:
             record = self.find(name)
             if record is None:
                 continue
-            self.slot_counters[record.slot] += 1
+            self.slot_versions[record.slot] += 1
             if name in self.pending:
                 self.active[name] = self.pending.pop(name)
 
@@ -177,7 +178,7 @@ class AdapterRegistry:
             name=record.name,
             config=record.config,
             slot=record.slot,
-            version=self.slot_counters[record.slot],
+            version=self.slot_versions[record.slot],
             step=record.step,
         )
 
