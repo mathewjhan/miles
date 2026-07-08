@@ -1,7 +1,7 @@
 """Custom fully-async multi-LoRA rollout function.
 
 Mirrors ``examples/fully_async/fully_async_rollout.py`` (continuous background
-producer + drain-a-batch) but for multi-LoRA:
+producer + collect-a-batch) but for multi-LoRA:
   - ``generate`` sets ``rid = make_rid(adapter_name)`` next to ``lora_path`` for
     multi-LoRA samples, so the controller proxy can correlate/dummy by adapter,
   - sends through the multi-LoRA controller proxy (``--sglang-router-ip/port``
@@ -162,7 +162,7 @@ class AsyncMultiLoRAWorker:
 async def generate_rollout_multi_lora_async(
     args, rollout_id: int, data_source, generate_fn: GenerateFn = generate_and_rm_group
 ) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
-    """Fully-async multi-LoRA rollout. Drain a batch from the background worker,
+    """Fully-async multi-LoRA rollout. Collect a batch from the background worker,
     then run the same postprocess as ``generate_rollout_async``."""
     assert args.rollout_global_dataset
 
@@ -183,7 +183,7 @@ async def generate_rollout_multi_lora_async(
     # per-adapter source is a read-only RolloutDataSource whose add_samples
     # raises, so for now stale groups are discarded rather than regenerated under
     # fresh weights. Groups for deregistered adapters are dropped too. The
-    # current version is read through a short-TTL cache so a long drain doesn't
+    # current version is read through a short-TTL cache so a long collection doesn't
     # compare against a stale snapshot.
     max_staleness = getattr(args, "max_weight_staleness", None)
 

@@ -6,7 +6,7 @@ tracking:
   - register adapters from CLI (parse YAML -> AdapterConfig) + load into Megatron
     slots via ``actor_model.load_adapters``,
   - loop: read ``active_adapters``, reconcile (cleanup adapters no longer active),
-    drain a batch from the continuous rollout, train, upsert via ``update_weights``,
+    collect a batch from the continuous rollout, train, upsert via ``update_weights``,
   - the data source deregisters adapters at num_row; the trainer cleans them up
     (save ckpt + clear slot + free) on reconcile.
 
