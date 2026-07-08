@@ -3,6 +3,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -10,6 +11,7 @@ from aiohttp import web
 
 from types import SimpleNamespace
 
+from miles.utils.adapter_config import AdapterConfig
 from miles.utils.multi_lora import MultiLoRABackend, MultiLoRAHTTPServer, make_rid
 
 
@@ -148,6 +150,34 @@ async def test_control_routes_only_on_api_listener():
         _, body = await ctl.proxy_post("/register_adapter", {"name": "A"})
         assert body.get("text") == "upstream-ok"
         assert ctl.backend.registry.active_adapters() == {}
+
+
+@pytest.mark.asyncio
+async def test_register_json_config_validates_to_adapter_config():
+    """FastAPI validates the JSON body straight into AdapterConfig (422 on bad
+    payloads); /active_adapters exposes slot, version and step for external
+    orchestration."""
+    async with running_controller() as ctl:
+        config = {
+            "rank": 8,
+            "data": "/data/train.parquet",
+            "save": "/tmp/adapters/A",
+            "rm_type": "math",
+        }
+        status, _ = await ctl.api_post("/register_adapter", {"name": "A", "config": config})
+        assert status == 200
+        record = ctl.backend.registry.find("A")
+        assert isinstance(record.config, AdapterConfig)
+        assert record.config.data == "/data/train.parquet"
+        assert Path(record.config.save) == Path("/tmp/adapters/A")
+        assert record.config.input_key == "text"  # dataclass default
+
+        status, _ = await ctl.api_post("/register_adapter", {"name": "B", "config": {"rank": 8}})
+        assert status == 422  # data is required
+
+        ctl.backend.registry.record_weight_update(["A"])
+        _, body, _ = await ctl.api_get("/active_adapters")
+        assert body == {"A": {"slot": 0, "version": 1, "step": 0}}
 
 
 @pytest.mark.asyncio
