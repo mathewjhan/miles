@@ -192,7 +192,7 @@ async def generate_rollout_multi_lora_async(
     staleness_values: list[int] = []
     start_time = time.time()
     last_progress = start_time
-    queue_backlog_start = worker.queue_size()
+    queue_length = worker.queue_size()  # completed groups waiting as batch filling begins
     while len(data) < target_data_size:
         made_progress = False
         current_versions = await SlotVersionCache().get_all()
@@ -275,13 +275,12 @@ async def generate_rollout_multi_lora_async(
 
     metrics = {
         **metric_gatherer.collect(),
-        "rollout/queue_backlog_start": queue_backlog_start,
-        "rollout/queue_backlog_end": worker.queue_size(),
-        "perf/batch_collection_time": time.time() - start_time,
-        "rollout/stale_dropped": stale_dropped,
+        "perf/fully_async/queue_length": queue_length,
+        "perf/fully_async/batch_wait_time": time.time() - start_time,
+        "perf/fully_async/stale_dropped": stale_dropped,
     }
     if staleness_values:
-        metrics["rollout/stale_dropped_avg_staleness"] = sum(staleness_values) / len(staleness_values)
+        metrics["perf/fully_async/stale_dropped_avg_staleness"] = sum(staleness_values) / len(staleness_values)
 
     return RolloutFnTrainOutput(samples=data, metrics=metrics)
 
