@@ -197,10 +197,11 @@ async def generate_rollout_multi_lora_async(
     max_staleness = getattr(args, "max_weight_staleness", None)
 
     data: list[list[Sample]] = []
-    stale_recycled = 0
+    stale_dropped = 0
     staleness_values: list[int] = []
     start_time = time.time()
     last_progress = start_time
+    queue_backlog_start = worker.queue_size()
     while len(data) < target_data_size:
         made_progress = False
         current_versions = await SlotVersionCache().get_all()
@@ -228,7 +229,7 @@ async def generate_rollout_multi_lora_async(
                         #     data_source.add_samples([group])
                         # except Exception as e:
                         #     logger.warning(f"Failed to recycle stale group: {e}")
-                        stale_recycled += 1
+                        stale_dropped += 1
                         staleness_values.append(staleness)
                         logger.info(
                             f"Dropped stale group (adapter={adapter_name}, "
@@ -253,12 +254,11 @@ async def generate_rollout_multi_lora_async(
         if len(data) < target_data_size:
             await asyncio.sleep(0.01)
 
-    if stale_recycled or staleness_values:
-        avg_staleness = sum(staleness_values) / len(staleness_values) if staleness_values else 0
+    if stale_dropped:
         logger.info(
-            f"Staleness stats: recycled={stale_recycled}, "
-            f"avg_staleness={avg_staleness:.1f}, "
-            f"max_staleness={max(staleness_values) if staleness_values else 0}"
+            f"Staleness stats: dropped={stale_dropped}, "
+            f"avg_staleness={sum(staleness_values) / len(staleness_values):.1f}, "
+            f"max_staleness={max(staleness_values)}"
         )
 
     data = sorted(data, key=lambda g: g[0].index)
@@ -277,7 +277,17 @@ async def generate_rollout_multi_lora_async(
         sampling_params=state.sampling_params,
     )
 
-    return RolloutFnTrainOutput(samples=data, metrics=metric_gatherer.collect())
+    metrics = {
+        **metric_gatherer.collect(),
+        "rollout/queue_backlog_start": queue_backlog_start,
+        "rollout/queue_backlog_end": worker.queue_size(),
+        "perf/batch_collection_time": time.time() - start_time,
+        "rollout/stale_dropped": stale_dropped,
+    }
+    if staleness_values:
+        metrics["rollout/stale_dropped_avg_staleness"] = sum(staleness_values) / len(staleness_values)
+
+    return RolloutFnTrainOutput(samples=data, metrics=metrics)
 
 
 def generate_rollout_multi_lora(args, rollout_id: int, data_source, evaluation: bool = False):
