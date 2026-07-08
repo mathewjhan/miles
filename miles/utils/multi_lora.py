@@ -17,8 +17,10 @@ adapter's in-flight engine requests (by exact rid).
 import asyncio
 import json
 import logging
+import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -46,6 +48,10 @@ __all__ = [
 # adapter names (enforced at registration) so that rid prefix matching in
 # SGLang's abort_request cannot hit another adapter's requests.
 RID_SEPARATOR = "::"
+
+# Names become rid prefixes and filesystem path components (default save dirs),
+# so restrict them to a path- and separator-safe alphabet.
+VALID_ADAPTER_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def make_rid(adapter_name: str) -> str:
@@ -98,12 +104,21 @@ class AdapterRegistry:
         return name in self.active
 
     def register(self, name: str, config: Any) -> dict:
-        if RID_SEPARATOR in name:
-            raise ValueError(f"Adapter name '{name}' must not contain '{RID_SEPARATOR}'")
+        if not VALID_ADAPTER_NAME.match(name) or name in (".", ".."):
+            raise ValueError(
+                f"Adapter name '{name}' is invalid: use only letters, digits, '.', '_' and '-'"
+            )
         if name in self.pending or name in self.active:
             raise ValueError(f"Adapter '{name}' already registered")
         if name in self.cleanup:
             raise ValueError(f"Adapter '{name}' is still cleaning up; retry shortly")
+        if (save_dir := getattr(config, "save", None)) is not None:
+            for record in (self.pending | self.active | self.cleanup).values():
+                other_save = getattr(record.config, "save", None)
+                if other_save is not None and Path(other_save).resolve() == Path(save_dir).resolve():
+                    raise ValueError(
+                        f"Adapter '{name}' save dir '{save_dir}' is already used by adapter '{record.name}'"
+                    )
         if not self.free_slots:
             raise RuntimeError(f"No free adapter slots (max {self.max_adapters})")
         slot = min(self.free_slots)
@@ -185,8 +200,9 @@ class MultiLoRABackend:
     (``--multi-lora-backend-path``) and override ``validate_adapter`` to
     reject registrations."""
 
-    def __init__(self, max_adapters: int, upstream_url: str) -> None:
-        self.registry = AdapterRegistry(max_adapters)
+    def __init__(self, args: Any, upstream_url: str) -> None:
+        self.args = args
+        self.registry = AdapterRegistry(args.multi_lora_n_adapters)
         self.in_flight: dict[str, str] = {}
         self.upstream_url = upstream_url.rstrip("/")
         self.client: httpx.AsyncClient | None = None
@@ -206,9 +222,27 @@ class MultiLoRABackend:
     async def validate_adapter(self, name: str, config: Any) -> None:
         """Override to reject adapter registrations (raise ValueError)."""
 
+    def resolve_save_dir(self, name: str, config: Any) -> Any:
+        """Default a missing per-adapter save dir to {args.save}/adapters/{name};
+        an explicit config.save is kept as-is."""
+        if config is None or not hasattr(config, "save"):
+            return config
+        if config.save is not None:
+            return config
+        if getattr(self.args, "save", None) is None:
+            raise ValueError(
+                f"Adapter '{name}' has no save dir: set 'save' in the adapter config or pass --save"
+            )
+        return replace(config, save=Path(self.args.save) / "adapters" / name)
+
     async def register(self, name: str, config: Any) -> dict:
         await self.validate_adapter(name, config)
-        return self.registry.register(name, config)
+        config = self.resolve_save_dir(name, config)
+        result = self.registry.register(name, config)
+        resolved = getattr(config, "save", None)
+        if resolved is not None:
+            logger.info(f"Adapter '{name}' registered (slot {result['slot']}), checkpoints -> {resolved}")
+        return result
 
     async def deregister(self, name: str) -> None:
         self.registry.deregister(name)

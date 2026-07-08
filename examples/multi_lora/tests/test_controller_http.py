@@ -8,6 +8,8 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+from types import SimpleNamespace
+
 from miles.utils.multi_lora import MultiLoRABackend, MultiLoRAHTTPServer, make_rid
 
 
@@ -84,7 +86,7 @@ async def running_controller(delay: float = 0.0, server_cls=MultiLoRAHTTPServer)
     await site.start()
     upstream_url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
 
-    backend = MultiLoRABackend(4, upstream_url)
+    backend = MultiLoRABackend(SimpleNamespace(multi_lora_n_adapters=4, save=None), upstream_url)
     srv = server_cls(backend)
     await backend.init()
     await srv.start()

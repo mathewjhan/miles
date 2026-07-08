@@ -1,13 +1,24 @@
 """Fast tests for AdapterRegistry + MultiLoRABackend gating/validation
 (no Ray, no HTTP I/O, no SGLang, no torch)."""
 
+from types import SimpleNamespace
+
 import pytest
 
+from miles.utils.adapter_config import AdapterConfig
 from miles.utils.multi_lora import AdapterRegistry, MultiLoRABackend, make_rid, parse_adapter
 
 
-def make_backend(max_adapters: int = 4) -> MultiLoRABackend:
-    return MultiLoRABackend(max_adapters, "http://unused")
+def make_args(max_adapters: int = 4, save: str | None = None) -> SimpleNamespace:
+    return SimpleNamespace(multi_lora_n_adapters=max_adapters, save=save)
+
+
+def make_backend(max_adapters: int = 4, save: str | None = None) -> MultiLoRABackend:
+    return MultiLoRABackend(make_args(max_adapters, save), "http://unused")
+
+
+def make_config(save: str | None = None) -> AdapterConfig:
+    return AdapterConfig(rank=8, alpha=16, data="/d", save=save, input_key="text", label_key="label", rm_type="math")
 
 
 def register_and_promote(registry: AdapterRegistry, name: str, config=None) -> None:
@@ -155,10 +166,48 @@ async def test_custom_backend_validation_rejects():
             if not config:
                 raise ValueError("adapter config is required")
 
-    backend = StrictBackend(4, "http://unused")
+    backend = StrictBackend(make_args(), "http://unused")
     with pytest.raises(ValueError, match="config is required"):
         await backend.register("A", None)
     assert backend.registry.active_adapters() == {}
 
     result = await backend.register("A", {"rm_type": "x"})
     assert result == {"name": "A", "slot": 0}
+
+
+def test_register_rejects_unsafe_names():
+    registry = AdapterRegistry(max_adapters=4)
+    for bad in ["a/b", "..", "a::b", "a b", ""]:
+        with pytest.raises(ValueError, match="invalid"):
+            registry.register(bad, None)
+    registry.register("ok-name_1.2", None)
+
+
+def test_register_rejects_duplicate_save_dir(tmp_path):
+    registry = AdapterRegistry(max_adapters=4)
+    registry.register("A", make_config(save=tmp_path / "x"))
+    with pytest.raises(ValueError, match="already used by adapter 'A'"):
+        registry.register("B", make_config(save=tmp_path / "x"))
+    registry.register("C", make_config(save=tmp_path / "y"))
+
+
+@pytest.mark.asyncio
+async def test_save_dir_defaults_under_save_root(tmp_path):
+    backend = make_backend(save=str(tmp_path))
+    await backend.register("A", make_config())
+    saved = backend.registry.pending["A"].config.save
+    assert saved == tmp_path / "adapters" / "A"
+
+
+@pytest.mark.asyncio
+async def test_explicit_save_dir_wins_over_root(tmp_path):
+    backend = make_backend(save=str(tmp_path))
+    await backend.register("A", make_config(save=tmp_path / "custom"))
+    assert backend.registry.pending["A"].config.save == tmp_path / "custom"
+
+
+@pytest.mark.asyncio
+async def test_register_fails_without_any_save_dir():
+    backend = make_backend(save=None)
+    with pytest.raises(ValueError, match="no save dir"):
+        await backend.register("A", make_config())
