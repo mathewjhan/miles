@@ -11,8 +11,9 @@ from typing import Any
 
 import ray
 
-from miles.utils.misc import SingletonMeta, load_function
+from miles.utils.misc import SingletonMeta, get_current_node_ip, load_function
 from miles.utils.multi_lora import MultiLoRABackend, MultiLoRAHTTPServer
+from miles.utils.ray_utils import compute_ray_pin_head_options
 
 CONTROLLER_NAME = "miles_multi_lora_controller"
 CONTROLLER_NAMESPACE = "miles"
@@ -105,7 +106,9 @@ class MultiLoRAController:
         return self.backend.registry.snapshot()
 
     def http_host(self) -> str:
-        return self.server.host
+        """Routable address of the controller's node (the head node), not the
+        0.0.0.0 bind host."""
+        return get_current_node_ip()
 
     def http_port(self) -> int:
         return self.server.actual_port
@@ -115,6 +118,10 @@ class MultiLoRAController:
 
 
 def create_controller(args, upstream_url: str, host: str = "0.0.0.0", port: int = 0):
+    # Pinned to the head node so the API listener sits at a known address
+    # (head_ip:--multi-lora-api-port), reachable via port-forward to the head pod.
     return MultiLoRAController.options(
-        name=CONTROLLER_NAME, namespace=CONTROLLER_NAMESPACE
+        name=CONTROLLER_NAME,
+        namespace=CONTROLLER_NAMESPACE,
+        **compute_ray_pin_head_options(),
     ).remote(args, upstream_url, host, port)

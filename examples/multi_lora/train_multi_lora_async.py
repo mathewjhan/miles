@@ -53,6 +53,8 @@ async def main(args):
     host = await controller.http_host.remote()
     args.sglang_router_ip = host
     args.sglang_router_port = port
+    api_port = await controller.api_port.remote()
+    logger.info(f"Multi-LoRA control API listening on http://{host}:{api_port} (head node)")
 
     actor_model, _ = await create_training_models(args, pgs, rollout_manager)
 
