@@ -24,7 +24,7 @@ from miles.rollout.sglang_rollout import (
 from miles.utils.async_utils import run
 from miles.utils.misc import load_function
 
-from miles.ray.multi_lora_controller import SlotVersionCache, get_multi_lora_controller
+from miles.ray.multi_lora_controller import ActiveAdaptersCache, get_multi_lora_controller
 
 from miles.utils.types import Sample
 
@@ -49,7 +49,8 @@ async def process_group(
     adapter_name = group[0].adapter.name if group and group[0].adapter else None
     submission_version: int | None = None
     if adapter_name is not None:
-        submission_version = await SlotVersionCache().get(adapter_name)
+        adapter = await ActiveAdaptersCache().get(adapter_name)
+        submission_version = adapter.version if adapter is not None else None
 
     if submission_version is not None:
         for s in group:
@@ -184,7 +185,7 @@ async def generate_rollout_multi_lora_async(
     queue_length = worker.queue_size()  # completed groups waiting as batch filling begins
     while len(data) < target_data_size:
         made_progress = False
-        current_versions = await SlotVersionCache().get_all()
+        current_adapters = await ActiveAdaptersCache().get_all()
         # Pop one group at a time so the queue keeps anything beyond what this
         # batch needs; a bulk snapshot would discard the surplus.
         while len(data) < target_data_size:
@@ -193,14 +194,14 @@ async def generate_rollout_multi_lora_async(
             except queue.Empty:
                 break
             adapter_name = group[0].adapter.name if group and group[0].adapter else None
-            if adapter_name not in current_versions:
+            if adapter_name not in current_adapters:
                 # Adapter deregistered; its per-adapter source is gone, so the
                 # group cannot be recycled. Discard.
                 continue
             if max_staleness is not None:
                 stamped = group[0].metadata.get("slot_version")
                 if stamped is not None:
-                    staleness = current_versions.get(adapter_name, 0) - stamped
+                    staleness = current_adapters[adapter_name].version - stamped
                     if staleness > max_staleness:
                         # Stale group. Re-queuing disabled for now: the
                         # per-adapter source is a read-only RolloutDataSource
@@ -219,7 +220,7 @@ async def generate_rollout_multi_lora_async(
                         staleness_values.append(staleness)
                         logger.info(
                             f"Dropped stale group (adapter={adapter_name}, "
-                            f"stamped={stamped}, current={current_versions.get(adapter_name, 0)}, "
+                            f"stamped={stamped}, current={current_adapters[adapter_name].version}, "
                             f"staleness={staleness} > max={max_staleness})"
                         )
                         continue

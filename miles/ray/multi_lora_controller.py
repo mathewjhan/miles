@@ -11,6 +11,7 @@ from typing import Any
 
 import ray
 
+from miles.utils.adapter_config import RegisteredAdapter
 from miles.utils.misc import SingletonMeta, get_current_node_ip, load_function
 from miles.utils.multi_lora import MultiLoRABackend, MultiLoRAHTTPServer
 from miles.utils.ray_utils import compute_ray_pin_head_options
@@ -24,26 +25,25 @@ def get_multi_lora_controller():
     return ray.get_actor(CONTROLLER_NAME, namespace=CONTROLLER_NAMESPACE)
 
 
-class SlotVersionCache(metaclass=SingletonMeta):
-    """TTL-cached snapshot of the controller's active adapters -> slot version."""
+class ActiveAdaptersCache(metaclass=SingletonMeta):
+    """TTL-cached snapshot of the controller's active adapters (RegisteredAdapter views)."""
 
     def __init__(self, ttl_s: float = 1.0) -> None:
         self.ttl_s = ttl_s
-        self.versions: dict[str, int] = {}
+        self.adapters: dict[str, RegisteredAdapter] = {}
         self.last_refresh: float | None = None
 
-    async def get_all(self) -> dict[str, int]:
+    async def get_all(self) -> dict[str, "RegisteredAdapter"]:
         now = time.monotonic()
         if self.last_refresh is None or now - self.last_refresh >= self.ttl_s:
             try:
-                adapters = await get_multi_lora_controller().active_adapters.remote()
-                self.versions = {name: adapter.version for name, adapter in adapters.items()}
+                self.adapters = await get_multi_lora_controller().active_adapters.remote()
                 self.last_refresh = now
             except Exception:
                 pass
-        return self.versions
+        return self.adapters
 
-    async def get(self, adapter_name: str) -> int | None:
+    async def get(self, adapter_name: str) -> "RegisteredAdapter | None":
         return (await self.get_all()).get(adapter_name)
 
 

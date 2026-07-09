@@ -17,18 +17,23 @@ class FakeDataSource:
         self.added.extend(groups)
 
 
-class FakeVersionCache:
+class FakeAdapterView:
+    def __init__(self, version: int) -> None:
+        self.version = version
+
+
+class FakeAdaptersCache:
     def __init__(self, versions: dict[str, int]) -> None:
         self.versions = versions
 
     def bump(self, name: str, to: int) -> None:
         self.versions[name] = to
 
-    async def get_all(self) -> dict[str, int]:
-        return dict(self.versions)
+    async def get_all(self) -> dict[str, FakeAdapterView]:
+        return {name: FakeAdapterView(version) for name, version in self.versions.items()}
 
-    async def get(self, adapter_name: str) -> int | None:
-        return self.versions.get(adapter_name)
+    async def get(self, adapter_name: str) -> FakeAdapterView | None:
+        return (await self.get_all()).get(adapter_name)
 
 
 def group(adapter: str = "A", slot: int = 0) -> list[Sample]:
@@ -69,13 +74,13 @@ async def test_process_group_recycles_aborted():
 @pytest.mark.asyncio
 async def test_process_group_stamps_submission_version(monkeypatch):
     """The stamp is the version live at submission (5), not completion (7)."""
-    cache = FakeVersionCache({"A": 5})
+    cache = FakeAdaptersCache({"A": 5})
 
     async def gen(args, group, sampling_params):
         cache.bump("A", 7)  # update lands mid-generation
         return await gen_completed(args, group, sampling_params)
 
-    monkeypatch.setattr(mod, "SlotVersionCache", lambda: cache)
+    monkeypatch.setattr(mod, "ActiveAdaptersCache", lambda: cache)
 
     ds = FakeDataSource()
     g = group("A")
@@ -89,9 +94,9 @@ async def test_process_group_stamps_submission_version(monkeypatch):
 async def test_process_group_no_adapter_skips_stamp(monkeypatch):
     class FailingCache:
         async def get(self, adapter_name):
-            raise AssertionError("version cache should not be queried for adapter-less group")
+            raise AssertionError("adapters cache should not be queried for adapter-less group")
 
-    monkeypatch.setattr(mod, "SlotVersionCache", FailingCache)
+    monkeypatch.setattr(mod, "ActiveAdaptersCache", FailingCache)
 
     ds = FakeDataSource()
     g = [Sample(prompt="p", adapter=None)]
