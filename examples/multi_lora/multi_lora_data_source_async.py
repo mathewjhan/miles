@@ -35,7 +35,6 @@ class MultiLoRAAsyncDataSource(DataSource):
         self.args = args
         self.sources: dict[str, RolloutDataSource] = {}
         self.source_queue: deque = deque()
-        self.reconcile(fetch_active_adapters())
 
     def reconcile(self, adapters: dict[str, RegisteredAdapter]) -> None:
         for name in list(self.sources):
