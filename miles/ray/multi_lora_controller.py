@@ -25,23 +25,30 @@ def get_multi_lora_controller():
     return ray.get_actor(CONTROLLER_NAME, namespace=CONTROLLER_NAMESPACE)
 
 
-class ActiveAdaptersCache(metaclass=SingletonMeta):
-    """TTL-cached snapshot of the controller's active adapters (RegisteredAdapter views)."""
+class AdaptersCache(metaclass=SingletonMeta):
+    """TTL-cached controller snapshot (adapters partitioned by phase).
+
+    ``get``/``get_all`` expose the sampleable projection (active ∪ retiring),
+    which is what generation-side consumers filter and stamp against."""
 
     def __init__(self, ttl_s: float = 1.0) -> None:
         self.ttl_s = ttl_s
-        self.adapters: dict[str, RegisteredAdapter] = {}
+        self.snapshot: dict = {"pending": {}, "active": {}, "retiring": {}, "cleanup": []}
         self.last_refresh: float | None = None
 
-    async def get_all(self) -> dict[str, "RegisteredAdapter"]:
+    async def get_snapshot(self) -> dict:
         now = time.monotonic()
         if self.last_refresh is None or now - self.last_refresh >= self.ttl_s:
             try:
-                self.adapters = await get_multi_lora_controller().active_adapters.remote()
+                self.snapshot = await get_multi_lora_controller().snapshot.remote()
                 self.last_refresh = now
             except Exception:
                 pass
-        return self.adapters
+        return self.snapshot
+
+    async def get_all(self) -> dict[str, "RegisteredAdapter"]:
+        snapshot = await self.get_snapshot()
+        return {**snapshot["active"], **snapshot["retiring"]}
 
     async def get(self, adapter_name: str) -> "RegisteredAdapter | None":
         return (await self.get_all()).get(adapter_name)
@@ -81,6 +88,9 @@ class MultiLoRAController:
     async def deregister_adapter(self, name: str) -> None:
         await self.backend.deregister(name)
 
+    async def retire_adapters(self) -> list[str]:
+        return await self.backend.retire_adapters()
+
     def free_slot(self, name: str) -> int:
         return self.backend.registry.free_slot(name)
 
@@ -98,9 +108,6 @@ class MultiLoRAController:
 
     def adapter_step(self, name: str) -> int:
         return self.backend.registry.step_count(name)
-
-    def active_adapters(self) -> dict:
-        return self.backend.registry.active_adapters()
 
     def snapshot(self) -> dict:
         return self.backend.registry.snapshot()

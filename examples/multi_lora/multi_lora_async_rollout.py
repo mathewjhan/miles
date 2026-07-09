@@ -24,7 +24,7 @@ from miles.rollout.sglang_rollout import (
 from miles.utils.async_utils import run
 from miles.utils.misc import load_function
 
-from miles.ray.multi_lora_controller import ActiveAdaptersCache, get_multi_lora_controller
+from miles.ray.multi_lora_controller import AdaptersCache, get_multi_lora_controller
 
 from miles.utils.types import Sample
 
@@ -49,7 +49,7 @@ async def process_group(
     adapter_name = group[0].adapter.name if group and group[0].adapter else None
     submission_version: int | None = None
     if adapter_name is not None:
-        adapter = await ActiveAdaptersCache().get(adapter_name)
+        adapter = await AdaptersCache().get(adapter_name)
         submission_version = adapter.version if adapter is not None else None
 
     if submission_version is not None:
@@ -185,7 +185,7 @@ async def generate_rollout_multi_lora_async(
     queue_length = worker.queue_size()  # completed groups waiting as batch filling begins
     while len(data) < target_data_size:
         made_progress = False
-        current_adapters = await ActiveAdaptersCache().get_all()
+        current_adapters = await AdaptersCache().get_all()
         # Pop one group at a time so the queue keeps anything beyond what this
         # batch needs; a bulk snapshot would discard the surplus.
         while len(data) < target_data_size:

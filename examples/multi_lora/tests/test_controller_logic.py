@@ -52,6 +52,7 @@ def test_snapshot_reports_sets_in_registry_vocabulary():
     snapshot = registry.snapshot()
     assert set(snapshot["active"]) == {"A"}
     assert set(snapshot["pending"]) == {"B"}
+    assert snapshot["retiring"] == {}
     assert snapshot["cleanup"] == []
     assert set(registry.active_adapters()) == {"A"}  # only active adapters are sampleable
 
@@ -61,6 +62,7 @@ def test_slot_version_is_monotonic_across_slot_reuse():
     register_and_promote(registry, "A")  # slot 0, version 1
     registry.record_weight_update(["A"])  # version 2
     registry.deregister("A")
+    registry.retire_adapters()
     registry.free_slot("A")
 
     registry.register("A2", None)  # reuses slot 0
@@ -83,9 +85,25 @@ def test_register_name_rejected_until_cleanup_done():
     register_and_promote(registry, "A")
     registry.deregister("A")
     with pytest.raises(ValueError, match="cleaning up"):
-        registry.register("A", None)
+        registry.register("A", None)  # retiring
+    registry.retire_adapters()
+    with pytest.raises(ValueError, match="cleaning up"):
+        registry.register("A", None)  # cleanup
     registry.free_slot("A")
     assert registry.register("A", None) == {"name": "A", "slot": 0}
+
+
+def test_deregister_retires_but_keeps_serving_until_demoted():
+    registry = AdapterRegistry(max_adapters=4)
+    register_and_promote(registry, "A")
+    registry.deregister("A")
+    assert "A" in registry.retiring
+    assert "A" in registry.active_adapters()  # still sampleable this iteration
+    assert "A" in registry.snapshot()["retiring"]
+    assert registry.retire_adapters() == ["A"]
+    assert registry.active_adapters() == {}
+    assert "A" in registry.cleanup
+    assert registry.retire_adapters() == []  # idempotent
 
 
 def test_batch_record_counts_steps_on_confirmation():
@@ -108,6 +126,8 @@ def test_batch_trained_counts_deregistered_adapter_until_freed():
     registry.deregister("A")  # deregistered while its batch is training
     assert registry.mark_batch_trained(3) == ["A"]
     assert registry.step_count("A") == 1  # final ckpt reads this
+    registry.retire_adapters()
+    assert registry.step_count("A") == 1  # cleanup record still holds it
     registry.free_slot("A")
     assert registry.step_count("A") == 0
 
@@ -127,6 +147,7 @@ def test_deregister_holds_slot_until_free_slot():
     register_and_promote(registry, "A")  # slot 0
     register_and_promote(registry, "B")  # slot 1
     registry.deregister("A")
+    registry.retire_adapters()
     assert not registry.free_slots  # slot 0 held until cleanup
     with pytest.raises(RuntimeError, match="No free adapter slots"):
         registry.register("C", None)

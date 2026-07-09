@@ -94,14 +94,18 @@ async def test_register_and_active_view():
 
 
 @pytest.mark.asyncio
-async def test_deregister_posts_prefix_abort_to_every_worker():
-    """Deregistration fans out one abort per worker with rid = 'name::' and
-    the explicit prefix flag; the engine matches it against all in-flight
-    rids of that adapter."""
+async def test_deregister_marks_and_retire_adapters_aborts():
+    """Deregistration only marks; the driver-synced apply performs the
+    demotion and fans out one prefix abort per worker."""
     async with running_controller() as ctl:
         await ctl.register("A")
         status, _ = await ctl.deregister("A")
         assert status == 200
+        assert ctl.aborts == []  # still serving until the sync point
+        assert "A" in ctl.backend.registry.active_adapters()
+
+        applied = await ctl.backend.retire_adapters()
+        assert applied == ["A"]
         assert ctl.aborts == [{"rid": f"A{RID_SEPARATOR}", "prefix": True}]
         assert ctl.backend.registry.active_adapters() == {}
 

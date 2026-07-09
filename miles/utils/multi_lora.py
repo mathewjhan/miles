@@ -85,14 +85,20 @@ class AdapterRegistry:
         self.slot_versions: list[int] = [0] * max_adapters
         self.pending: dict[str, AdapterRecord] = {}
         self.active: dict[str, AdapterRecord] = {}
+        # Deregistered but still serving until the next reconcile demotes them.
+        self.retiring: dict[str, AdapterRecord] = {}
+        # Being torn down (final ckpt, slot clear); removed by free_slot.
         self.cleanup: dict[str, AdapterRecord] = {}
         self.batch_adapters: dict[int, list[str]] = {}
 
+    def all_records(self) -> dict[str, AdapterRecord]:
+        return {**self.pending, **self.active, **self.retiring, **self.cleanup}
+
     def find(self, name: str) -> AdapterRecord | None:
-        return self.active.get(name) or self.pending.get(name) or self.cleanup.get(name)
+        return self.all_records().get(name)
 
     def is_active(self, name: str) -> bool:
-        return name in self.active
+        return name in self.active or name in self.retiring
 
     def register(self, name: str, config: Any) -> dict:
         if not VALID_ADAPTER_NAME.match(name) or name in (".", ".."):
@@ -101,10 +107,10 @@ class AdapterRegistry:
             )
         if name in self.pending or name in self.active:
             raise ValueError(f"Adapter '{name}' already registered")
-        if name in self.cleanup:
+        if name in self.retiring or name in self.cleanup:
             raise ValueError(f"Adapter '{name}' is still cleaning up; retry shortly")
         if (save_dir := getattr(config, "save", None)) is not None:
-            for record in (self.pending | self.active | self.cleanup).values():
+            for record in self.all_records().values():
                 other_save = getattr(record.config, "save", None)
                 if other_save is not None and Path(other_save).resolve() == Path(save_dir).resolve():
                     raise ValueError(
@@ -120,7 +126,13 @@ class AdapterRegistry:
     def deregister(self, name: str) -> None:
         record = self.active.pop(name, None) or self.pending.pop(name, None)
         if record is not None:
-            self.cleanup[name] = record
+            self.retiring[name] = record
+
+    def retire_adapters(self) -> list[str]:
+        demoted = sorted(self.retiring)
+        for name in demoted:
+            self.cleanup[name] = self.retiring.pop(name)
+        return demoted
 
     def free_slot(self, name: str) -> int:
         record = self.cleanup.pop(name, None)
@@ -148,7 +160,7 @@ class AdapterRegistry:
     def mark_batch_trained(self, rollout_id: int) -> list[str]:
         trained = []
         for name in self.batch_adapters.pop(rollout_id, []):
-            record = self.active.get(name) or self.cleanup.get(name)
+            record = self.active.get(name) or self.retiring.get(name) or self.cleanup.get(name)
             if record is not None:
                 record.step += 1
                 trained.append(name)
@@ -172,14 +184,16 @@ class AdapterRegistry:
         )
 
     def active_adapters(self) -> dict[str, RegisteredAdapter]:
-        return {name: self.view(record) for name, record in self.active.items()}
+        """The sampleable view: retiring adapters keep serving until retired."""
+        return {name: self.view(record) for name, record in {**self.active, **self.retiring}.items()}
 
     def snapshot(self) -> dict:
-        """Atomic view of all three sets, in the registry's own vocabulary.
-        The trainer loads pending + active and cleans up cleanup."""
+        """Atomic per-phase view. The trainer keeps pending/active/retiring
+        loaded and tears down cleanup."""
         return {
             "pending": {name: self.view(record) for name, record in self.pending.items()},
             "active": {name: self.view(record) for name, record in self.active.items()},
+            "retiring": {name: self.view(record) for name, record in self.retiring.items()},
             "cleanup": list(self.cleanup),
         }
 
@@ -232,7 +246,12 @@ class MultiLoRABackend:
 
     async def deregister(self, name: str) -> None:
         self.registry.deregister(name)
-        await self.abort_adapter_requests(name)
+
+    async def retire_adapters(self) -> list[str]:
+        names = self.registry.retire_adapters()
+        for name in names:
+            await self.abort_adapter_requests(name)
+        return names
 
     async def worker_urls(self) -> list[str]:
         assert self.client is not None

@@ -438,6 +438,11 @@ class MegatronTrainRayActor(TrainRayActor):
                     logger.info(f"Updating ref model at rollout_id {rollout_id}")
                 self.weights_backuper.backup("ref")
 
+        if is_multi_lora_enabled(self.args) and is_megatron_main_rank():
+            from miles.ray.multi_lora_controller import get_multi_lora_controller
+
+            ray.get(get_multi_lora_controller().mark_batch_trained.remote(rollout_id))
+
         log_perf_data(rollout_id, self.args)
 
     @timer
@@ -458,11 +463,13 @@ class MegatronTrainRayActor(TrainRayActor):
 
         broadcast_buffer = [None]
         if is_megatron_main_rank():
-            broadcast_buffer[0] = ray.get(get_multi_lora_controller().snapshot.remote())
+            controller = get_multi_lora_controller()
+            ray.get(controller.retire_adapters.remote())
+            broadcast_buffer[0] = ray.get(controller.snapshot.remote())
         if dist.is_initialized():
             dist.broadcast_object_list(broadcast_buffer, src=0, group=get_gloo_group())
         snapshot = broadcast_buffer[0]
-        should_be_loaded = {**snapshot["active"], **snapshot["pending"]}
+        should_be_loaded = {**snapshot["active"], **snapshot["pending"], **snapshot["retiring"]}
         cleanup_names = set(snapshot["cleanup"])
 
         loaded_names = set(self.loaded_adapters)
@@ -511,7 +518,8 @@ class MegatronTrainRayActor(TrainRayActor):
             # and broadcasts so the collective export lines up on all ranks.
             due_buffer = [None]
             if is_megatron_main_rank():
-                adapters = ray.get(get_multi_lora_controller().active_adapters.remote())
+                snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
+                adapters = {**snapshot["active"], **snapshot["retiring"]}
                 due_buffer[0] = {
                     name: adapter
                     for name, adapter in adapters.items()

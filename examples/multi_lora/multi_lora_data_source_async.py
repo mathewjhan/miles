@@ -1,6 +1,6 @@
 """Multi-LoRA data source for the fully-async design.
 
-Reads the new controller's ``active_adapters`` (RegisteredAdapter views,
+Reads the controller snapshot (RegisteredAdapter views,
 state=RUNNING — no state machine), round-robins over per-adapter prompt
 sources, tags samples with ``AdapterRef``/``RewardSpec``, and calls
 ``controller.deregister_adapter`` when an adapter reaches its ``num_row``.
@@ -26,8 +26,12 @@ logger = logging.getLogger(__name__)
 MAX_RECONCILE_WORKERS = 16
 
 
-def fetch_active_adapters() -> dict[str, RegisteredAdapter]:
-    return ray.get(get_multi_lora_controller().active_adapters.remote())
+def fetch_snapshot() -> dict:
+    return ray.get(get_multi_lora_controller().snapshot.remote())
+
+
+def sampleable(snapshot: dict) -> dict[str, RegisteredAdapter]:
+    return {**snapshot["active"], **snapshot["retiring"]}
 
 
 class MultiLoRAAsyncDataSource(DataSource):
@@ -79,7 +83,8 @@ class MultiLoRAAsyncDataSource(DataSource):
         self.source_queue = new_queue
 
     def get_samples(self, num_samples: int) -> list[list[Sample]]:
-        adapters = fetch_active_adapters()
+        snapshot = fetch_snapshot()
+        adapters = sampleable(snapshot)
         self.reconcile(adapters)
         if not self.sources:
             return []
@@ -119,7 +124,7 @@ class MultiLoRAAsyncDataSource(DataSource):
 
             default_num_row = (getattr(config, "num_epoch", 1) or 1) * len(source.dataset)
             num_row = config.num_row or default_num_row
-            if source.sample_group_index >= num_row:
+            if source.sample_group_index >= num_row and name not in snapshot["retiring"]:
                 logger.info(f"Adapter '{name}' reached num_row={num_row}, deregistering")
                 to_deregister.append(name)
 
@@ -130,7 +135,7 @@ class MultiLoRAAsyncDataSource(DataSource):
 
     def add_samples(self, samples: list[list[Sample]]) -> None:
         """Recycle retried/aborted groups; drop groups for deregistered adapters."""
-        adapters = fetch_active_adapters()
+        adapters = sampleable(fetch_snapshot())
         self.reconcile(adapters)
         for group in samples:
             name = group[0].adapter.name if group and group[0].adapter else None

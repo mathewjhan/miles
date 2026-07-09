@@ -6,7 +6,7 @@ rollout-id tracking:
     the router),
   - register adapters from CLI (parse YAML -> AdapterConfig) + load into Megatron
     slots via ``actor_model.load_adapters``,
-  - loop: read ``active_adapters``, reconcile (cleanup adapters no longer active),
+  - loop: read the controller snapshot, reconcile (retire + clean up),
     collect a batch from the continuous rollout, train, upsert via ``update_weights``,
   - the data source deregisters adapters at num_row; the trainer cleans them up
     (save ckpt + clear slot + free) on reconcile.
@@ -66,7 +66,7 @@ async def main(args):
     rollout_id = 0
     while True:
         snapshot = await get_multi_lora_controller().snapshot.remote()
-        if not (snapshot["pending"] or snapshot["active"] or snapshot["cleanup"]):
+        if not (snapshot["pending"] or snapshot["active"] or snapshot["retiring"] or snapshot["cleanup"]):
             if not args.multi_lora_service_mode:
                 logger.info("No adapters; exiting.")
                 break
@@ -83,12 +83,12 @@ async def main(args):
 
         # Reconcile may have cleaned up the last adapters (e.g. num_row reached):
         # with nothing active, generate would wait forever for a batch.
-        if not await get_multi_lora_controller().active_adapters.remote():
+        post_update = await get_multi_lora_controller().snapshot.remote()
+        if not (post_update["active"] or post_update["retiring"]):
             continue
 
         rollout_data = await rollout_manager.generate.remote(rollout_id)
         await actor_model.train(rollout_id, rollout_data)
-        await controller.mark_batch_trained.remote(rollout_id)
 
         # Save cadence is per adapter, decided inside save_model from each
         # adapter's own step count; deregistration cleanup saves final ckpts.
