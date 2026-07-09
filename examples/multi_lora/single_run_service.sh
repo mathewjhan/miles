@@ -1,11 +1,6 @@
 #!/bin/bash
-# Start the multi-LoRA trainer in service mode with NO adapters preloaded.
-# It idles until adapters are registered via the API listener on port 8068.
-#
-# Pair with the smoke test from another shell:
-#   python examples/multi_lora/service_smoke.py --api-url http://127.0.0.1:8068 \
-#     --data /root/gsm8k/train.parquet --input-key messages --label-key label \
-#     --rm-type math --steps 2
+# Service mode: no adapters preloaded, idles for registrations (API on :8068).
+# Pair with: python examples/multi_lora/service_smoke.py --api-url http://127.0.0.1:8068 ...
 set -ex
 
 export GPUS_PER_NODE=8

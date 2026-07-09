@@ -1,18 +1,8 @@
-"""Smoke test for multi-LoRA service mode: register/deregister adapters against
-a running trainer through the controller's API listener and verify lifecycle
-progress via step counts (steps only advance after a batch trains, so
-``step >= k`` is a race-free progress signal).
+"""Smoke test for multi-LoRA service mode: register/deregister against a running
+trainer, using step counts as the race-free progress signal.
 
-Start the trainer in service mode (no --multi-lora-adapter flags, no
---multi-lora-disable-service-mode, with --multi-lora-api-port set), then:
-
-    python examples/multi_lora/service_smoke.py --api-url http://HOST:8068 \\
-        --data /root/datasets/gsm8k/train.parquet --input-key messages \\
-        --label-key label --rm-type math
-
-Exercises: register -> promotion -> training progress, mid-run second
-registration, mid-run deregistration, name reuse after cleanup (slot reuse),
-and drain to idle. Exits 0 on success, 1 with a state dump on failure/timeout.
+Usage: python examples/multi_lora/service_smoke.py --api-url http://HOST:8068 \\
+    --data /root/gsm8k/train.parquet --input-key messages --label-key label --rm-type math
 """
 
 import argparse
