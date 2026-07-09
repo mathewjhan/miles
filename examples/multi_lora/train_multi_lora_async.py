@@ -1,8 +1,9 @@
 """Custom fully-async multi-LoRA trainer.
 
-Drives the new controller (Ray + HTTP proxy) with no drain and no rollout-id
-tracking:
-  - create the controller, point rollout requests at its HTTP proxy,
+Drives the controller (Ray actor + control-plane HTTP API) with no drain and no
+rollout-id tracking:
+  - create the controller (registry + API; generation traffic goes straight to
+    the router),
   - register adapters from CLI (parse YAML -> AdapterConfig) + load into Megatron
     slots via ``actor_model.load_adapters``,
   - loop: read ``active_adapters``, reconcile (cleanup adapters no longer active),
@@ -43,16 +44,11 @@ async def main(args):
     init_tracking(args)
     rollout_manager, _num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
 
-    # Create the controller AFTER the rollout manager (which sets
-    # args.sglang_router_ip/port to the Miles Router). The controller proxies
-    # to the Miles Router (the upstream), then we override args.sglang_router_ip/port
-    # to the controller so rollout requests go through it (block/dummy by adapter).
-    upstream_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
-    controller = create_controller(args, upstream_url)
-    port = await controller.start.remote()
+    router_ip, router_port = await rollout_manager.get_router_address.remote()
+    args.sglang_router_ip, args.sglang_router_port = router_ip, router_port
+    controller = create_controller(args, f"http://{router_ip}:{router_port}")
+    await controller.start.remote()
     host = await controller.http_host.remote()
-    args.sglang_router_ip = host
-    args.sglang_router_port = port
     api_port = await controller.api_port.remote()
     logger.info(f"Multi-LoRA control API listening on http://{host}:{api_port} (head node)")
 

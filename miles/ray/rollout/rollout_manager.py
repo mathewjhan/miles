@@ -93,6 +93,9 @@ class RolloutManager:
     # -------------------------- lifecycle -----------------------------
     # TODO: may have a `async def init` here later
 
+    def get_router_address(self) -> tuple[str, int]:
+        return self.args.sglang_router_ip, self.args.sglang_router_port
+
     def dispose(self):
         if self._metric_checker is not None:
             self._metric_checker.dispose()

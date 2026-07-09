@@ -1,21 +1,13 @@
-"""Multi-LoRA backend + HTTP proxy (no Ray, no torch).
+"""Multi-LoRA backend + control-plane HTTP server (no Ray, no torch).
 
-``MultiLoRABackend`` is the shared brain (adapter registry, in-flight rid
-tracking, gating, engine-facing abort). It has two thin transports: the
-``MultiLoRAController`` Ray actor in ``miles.ray.multi_lora_controller`` and
-the ``MultiLoRAHTTPServer`` defined here — both delegate every operation to
-the backend. FastAPI + httpx + uvicorn (same stack as the miles router),
-testable without Ray or torch.
-
-Correctness for adapter replacement: each rollout request carries
-``rid = make_rid(adapter_name)``. The proxy blocks forwards for adapters no
-longer active, dummies responses whose adapter was deregistered while the
-request was in flight, and ``MultiLoRABackend.deregister`` aborts the
-adapter's in-flight engine requests (by exact rid).
+``MultiLoRABackend`` is the shared brain behind two thin transports: the
+``MultiLoRAController`` Ray actor and the ``MultiLoRAHTTPServer`` here.
+Control plane only — generation traffic goes to the router directly; on
+deregister, one prefix abort (``rid = "{name}::"``) per worker reclaims the
+adapter's in-flight requests.
 """
 
 import asyncio
-import json
 import logging
 import re
 import uuid
@@ -25,8 +17,7 @@ from typing import Any
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from miles.utils.adapter_config import AdapterConfig, RegisteredAdapter
@@ -40,8 +31,6 @@ __all__ = [
     "RID_SEPARATOR",
     "make_rid",
     "parse_adapter",
-    "dummy_response_body",
-    "extract_rid",
 ]
 
 
@@ -197,24 +186,19 @@ class AdapterRegistry:
 
 
 class MultiLoRABackend:
-    """Shared brain behind the Ray actor and the HTTP server: adapter registry,
-    in-flight rid tracking, request gating, and engine-facing abort. Subclass
+    """Shared brain behind the Ray actor and the HTTP server: adapter registry
+    plus engine-facing abort (via the router's worker list). Subclass
     (``--multi-lora-backend-path``) and override ``validate_adapter`` to
     reject registrations."""
 
-    def __init__(self, args: Any, upstream_url: str) -> None:
+    def __init__(self, args: Any, router_url: str) -> None:
         self.args = args
         self.registry = AdapterRegistry(args.multi_lora_n_adapters)
-        self.in_flight: dict[str, str] = {}
-        self.upstream_url = upstream_url.rstrip("/")
+        self.router_url = router_url.rstrip("/")
         self.client: httpx.AsyncClient | None = None
 
     async def init(self) -> None:
-        # No timeout: proxied generate requests run for minutes.
-        self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(None),
-            limits=httpx.Limits(max_connections=4096, max_keepalive_connections=1024),
-        )
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
 
     async def close(self) -> None:
         if self.client is not None:
@@ -250,19 +234,6 @@ class MultiLoRABackend:
         self.registry.deregister(name)
         await self.abort_adapter_requests(name)
 
-    def on_forward(self, rid: str) -> bool:
-        name = parse_adapter(rid)
-        if not self.registry.is_active(name):
-            return False
-        self.in_flight[rid] = name
-        return True
-
-    def on_response(self, rid: str) -> bool:
-        name = self.in_flight.pop(rid, None)
-        if name is None:
-            return True
-        return not self.registry.is_active(name)
-
     async def worker_urls(self) -> list[str]:
         assert self.client is not None
         for endpoint, extract in (
@@ -270,7 +241,7 @@ class MultiLoRABackend:
             ("/workers", lambda body: [worker["url"] for worker in body["workers"]]),
         ):
             try:
-                resp = await self.client.get(f"{self.upstream_url}{endpoint}")
+                resp = await self.client.get(f"{self.router_url}{endpoint}")
                 if resp.status_code == 200:
                     return extract(resp.json())
             except Exception:
@@ -278,27 +249,21 @@ class MultiLoRABackend:
         return []
 
     async def abort_adapter_requests(self, adapter_name: str) -> None:
-        """Abort by exact rid on every worker: the engine drops aborts for
-        unknown rids, so prefix rids are ignored and wrong-worker posts are
-        harmless no-ops."""
-        rids = [rid for rid, name in self.in_flight.items() if name == adapter_name]
-        if not rids:
-            return
+        """Abort the adapter's in-flight requests: one prefix abort per worker."""
+        prefix = f"{adapter_name}{RID_SEPARATOR}"
         urls = await self.worker_urls()
+        if not urls:
+            logger.warning(f"Abort for adapter '{adapter_name}': no workers discovered at {self.router_url}")
+            return
         results = await asyncio.gather(
-            *(self.client.post(f"{url}/abort_request", json={"rid": rid}) for url in urls for rid in rids),
+            *(
+                self.client.post(f"{url}/abort_request", json={"rid": prefix, "prefix": True})
+                for url in urls
+            ),
             return_exceptions=True,
         )
         if failures := sum(isinstance(r, Exception) for r in results):
             logger.warning(f"Abort for adapter '{adapter_name}': {failures}/{len(results)} posts failed")
-
-
-def dummy_response_body(rid: str) -> dict:
-    return {
-        "text": "",
-        "meta_info": {"finish_reason": {"type": "abort"}},
-        "rid": rid,
-    }
 
 
 class RegisterRequest(BaseModel):
@@ -310,54 +275,26 @@ class DeregisterRequest(BaseModel):
     name: str
 
 
-def extract_rid(body: bytes) -> str | None:
-    if not body:
-        return None
-    try:
-        obj = json.loads(body)
-    except (ValueError, UnicodeDecodeError):
-        return None
-    if isinstance(obj, dict):
-        return obj.get("rid")
-    return None
-
-
 class MultiLoRAHTTPServer:
-    """FastAPI transport over a ``MultiLoRABackend``, served by embedded
-    uvicorns on two listeners with different audiences:
+    """FastAPI control plane over a ``MultiLoRABackend``, served by an embedded
+    uvicorn: register/deregister/active plus whatever subclasses add. No data
+    plane — generation traffic goes to the inference router directly.
 
-    * proxy listener (``port``): the catch-all data-plane proxy that rollout
-      requests flow through. Cluster-internal; never expose it.
-    * api listener (``api_port``): the control plane (register/deregister/
-      active + subclass routes). The only listener that should be exposed.
+    Subclasses (``--multi-lora-http-server-path``) override ``add_routes`` for
+    extra endpoints and ``create_app`` for middlewares (e.g. auth)."""
 
-    Subclasses override ``add_routes`` and ``create_app`` (e.g. middlewares) —
-    both scoped to the api app, so custom routes and auth can never shadow or
-    leak the proxy."""
-
-    def __init__(self, backend, host="127.0.0.1", port=0, api_port=0):
+    def __init__(self, backend, host="127.0.0.1", api_port=0):
         self.backend = backend
         self.host = host
-        self.port = port
         self.api_port = api_port
-        self.proxy_server: uvicorn.Server | None = None
-        self.proxy_task: asyncio.Task | None = None
         self.api_server: uvicorn.Server | None = None
         self.api_task: asyncio.Task | None = None
 
-    @staticmethod
-    def _bound_port(server: uvicorn.Server | None, configured: int) -> int:
-        if server is not None and server.started:
-            return server.servers[0].sockets[0].getsockname()[1]
-        return configured
-
-    @property
-    def actual_port(self) -> int:
-        return self._bound_port(self.proxy_server, self.port)
-
     @property
     def actual_api_port(self) -> int:
-        return self._bound_port(self.api_server, self.api_port)
+        if self.api_server is not None and self.api_server.started:
+            return self.api_server.servers[0].sockets[0].getsockname()[1]
+        return self.api_port
 
     def create_app(self) -> FastAPI:
         return FastAPI(title="Miles Multi-LoRA Controller")
@@ -367,34 +304,22 @@ class MultiLoRAHTTPServer:
         app.post("/deregister_adapter")(self.deregister_handler)
         app.get("/active_adapters")(self.active_handler)
 
-    def create_proxy_app(self) -> FastAPI:
-        app = FastAPI(title="Miles Multi-LoRA Proxy")
-        app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])(self.proxy_handler)
-        return app
-
-    async def _serve(self, app: FastAPI, port: int) -> tuple[uvicorn.Server, asyncio.Task]:
-        config = uvicorn.Config(app, host=self.host, port=port, log_level="warning", access_log=False)
-        server = uvicorn.Server(config)
-        task = asyncio.create_task(server.serve())
-        while not server.started:
-            if task.done():
-                task.result()
+    async def start(self) -> None:
+        app = self.create_app()
+        self.add_routes(app)
+        config = uvicorn.Config(app, host=self.host, port=self.api_port, log_level="warning", access_log=False)
+        self.api_server = uvicorn.Server(config)
+        self.api_task = asyncio.create_task(self.api_server.serve())
+        while not self.api_server.started:
+            if self.api_task.done():
+                self.api_task.result()
                 raise RuntimeError("uvicorn exited before startup completed")
             await asyncio.sleep(0.01)
-        return server, task
-
-    async def start(self) -> None:
-        self.proxy_server, self.proxy_task = await self._serve(self.create_proxy_app(), self.port)
-        api_app = self.create_app()
-        self.add_routes(api_app)
-        self.api_server, self.api_task = await self._serve(api_app, self.api_port)
 
     async def stop(self) -> None:
-        for server, task in ((self.api_server, self.api_task), (self.proxy_server, self.proxy_task)):
-            if server is not None:
-                server.should_exit = True
-                await task
-        self.proxy_server = self.proxy_task = None
+        if self.api_server is not None:
+            self.api_server.should_exit = True
+            await self.api_task
         self.api_server = self.api_task = None
 
     async def register_handler(self, body: RegisterRequest):
@@ -413,22 +338,3 @@ class MultiLoRAHTTPServer:
             name: {"slot": adapter.slot, "version": adapter.version, "step": adapter.step}
             for name, adapter in self.backend.registry.active_adapters().items()
         }
-
-    async def proxy_handler(self, request: Request):
-        body = await request.body()
-        rid = extract_rid(body)
-        if rid is not None and not self.backend.on_forward(rid):
-            return JSONResponse(dummy_response_body(rid))
-        url = f"{self.backend.upstream_url}/{request.path_params['path']}"
-        if request.url.query:
-            url = f"{url}?{request.url.query}"
-        headers = {k: v for k, v in request.headers.items()
-                   if k.lower() not in ("content-length", "transfer-encoding", "host")}
-        client = self.backend.client
-        assert client is not None
-        upstream = await client.request(request.method, url, content=body, headers=headers)
-        if rid is not None and self.backend.on_response(rid):
-            return JSONResponse(dummy_response_body(rid))
-        out_headers = {k: v for k, v in upstream.headers.items()
-                       if k.lower() not in ("content-length", "transfer-encoding", "content-encoding")}
-        return Response(content=upstream.content, status_code=upstream.status_code, headers=out_headers)

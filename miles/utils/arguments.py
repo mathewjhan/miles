@@ -1290,13 +1290,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--multi-lora-api-port",
                 type=int,
-                default=0,
-                help=(
-                    "Port for the multi-LoRA controller's control-plane API listener "
-                    "(register/deregister/active + custom routes). This is the only controller "
-                    "port that should be exposed externally; the data-plane proxy always binds "
-                    "an ephemeral internal port. 0 picks an ephemeral port (default: 0)"
-                ),
+                default=8068,
+                help="Port for the multi-LoRA controller's control-plane API, served from the head node (default: 8068)",
             )
             parser.add_argument(
                 "--multi-lora-disable-service-mode",

@@ -1,4 +1,4 @@
-"""Fast tests for AdapterRegistry + MultiLoRABackend gating/validation
+"""Fast tests for AdapterRegistry + MultiLoRABackend validation
 (no Ray, no HTTP I/O, no SGLang, no torch)."""
 
 from types import SimpleNamespace
@@ -132,31 +132,6 @@ def test_deregister_holds_slot_until_free_slot():
         registry.register("C", None)
     registry.free_slot("A")
     assert registry.register("C", None) == {"name": "C", "slot": 0}
-
-
-def test_forward_gating_follows_promotion():
-    backend = make_backend()
-    backend.registry.register("A", None)
-    assert backend.on_forward(make_rid("A")) is False  # pending -> blocked
-
-    backend.registry.record_weight_update(["A"])
-    rid = make_rid("A")
-    assert backend.on_forward(rid) is True
-    assert backend.on_response(rid) is False  # keep, not dummy
-
-
-def test_deregister_mid_flight_dummies_response():
-    backend = make_backend()
-    register_and_promote(backend.registry, "A")
-    rid = make_rid("A")
-    assert backend.on_forward(rid) is True
-    backend.registry.deregister("A")
-    assert backend.on_response(rid) is True  # dummy
-
-
-def test_forward_blocked_for_unknown_adapter():
-    backend = make_backend()
-    assert backend.on_forward(make_rid("A")) is False
 
 
 @pytest.mark.asyncio

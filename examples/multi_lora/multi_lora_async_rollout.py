@@ -1,19 +1,8 @@
 """Custom fully-async multi-LoRA rollout function.
 
 Mirrors ``examples/fully_async/fully_async_rollout.py`` (continuous background
-producer + collect-a-batch) but for multi-LoRA:
-  - ``generate`` sets ``rid = make_rid(adapter_name)`` next to ``lora_path`` for
-    multi-LoRA samples, so the controller proxy can correlate/dummy by adapter,
-  - sends through the multi-LoRA controller proxy (``--sglang-router-ip/port``
-    pointed at the controller), which blocks retired adapters and returns a
-    normal-shaped abort response for in-flight-retired stragglers,
-  - recycles aborted/dummied groups back to the data source,
-  - reuses ``generate_rollout_async``'s postprocess (dynamic filter,
-    sample filter.
-
-The per-group logic is factored into ``process_group`` (testable without a
-cluster); ``generate_fn`` defaults to the library ``generate_and_rm_group`` but
-is injectable for tests.
+producer + collect-a-batch) for multi-LoRA. Engine-side prefix aborts on
+deregister surface here as ``Sample.Status.ABORTED`` groups, which are dropped.
 """
 
 import asyncio
