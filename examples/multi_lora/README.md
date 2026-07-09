@@ -14,23 +14,28 @@ This example trains two adapters on Qwen3-4B:
 ```
 provision.sh                         # one-time: download model + datasets
 single_run.sh / single_run_disagg.sh # entrypoints: bounded run, exits when done
+single_run_service.sh                # service mode: idles for registrations (port 8068)
+service_smoke.py                     # register/deregister smoke test against the API
 train_multi_lora_async.py            # trainer (entry point)
-controller.py                        # controller logic + HTTP proxy (torch-free, tested)
-controller_actor.py                  # Ray actor wrapper (named, + HTTP out-of-band)
 multi_lora_async_rollout.py          # fully-async rollout function
 multi_lora_data_source_async.py      # data source (reads controller, deregisters at num_row)
-test_controller_*.py                 # controller logic + HTTP tests (no torch)
+tests/                               # controller logic + HTTP tests (no torch)
 adapters/
   gsm8k.yaml
   dapo_math.yaml
 ```
 
+Controller code lives in the library: `miles/utils/multi_lora.py` (registry +
+backend + HTTP API, torch-free) and `miles/ray/multi_lora_controller.py` (named
+Ray actor, pinned to the head node).
+
 ## Design (no drain, no state machine)
 
-- **Controller** (Ray actor + HTTP proxy) is the source of truth: `register_adapter` /
-  `deregister_adapter` / `active_adapters`. The data source reads it; the trainer reads
-  it; rollout requests are proxied through it (blocks deregistered adapters, dummies
-  in-flight stragglers via the `rid = {adapter}_{uuid}` set in `generate`).
+- **Controller** (Ray actor + control-plane HTTP API) is the source of truth:
+  `register_adapter` / `deregister_adapter` / `active_adapters`. The data source
+  reads it; the trainer reads it. Generation traffic goes straight to the router;
+  on deregister the controller aborts the adapter's in-flight requests
+  engine-side by rid prefix (`rid = {adapter}::{uuid}`, set in `generate`).
 - **No drain / no rollout-id / no train_steps / no PENDING-DRAINING-DRAINED states.**
   The data source deregisters an adapter at `num_row`; the trainer's
   `reconcile_adapters` (before each generate) cleans up gone adapters (save ckpt +
