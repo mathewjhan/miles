@@ -6,6 +6,7 @@ deregister surface here as ``Sample.Status.ABORTED`` groups, which are dropped.
 """
 
 import asyncio
+import itertools
 import logging
 import queue
 import threading
@@ -32,10 +33,23 @@ logger = logging.getLogger(__name__)
 
 GenerateFn = Callable[..., Any]
 
+# Group members are Sample or list[Sample]: custom generate fns may return
+# several samples per rollout. The nesting is kept intact through this file
+# (mirroring sglang_rollout) and flattened later by the rollout manager.
+Group = list[Sample | list[Sample]]
+
+
+def iter_group_samples(group: Group):
+    return itertools.chain.from_iterable(item if isinstance(item, list) else (item,) for item in group)
+
+
+def first_sample(group: Group) -> Sample:
+    return group[0][0] if isinstance(group[0], list) else group[0]
+
 
 async def process_group(
     args, group: list[Sample], sampling_params: dict, generate_fn: GenerateFn, data_source
-) -> list[Sample] | None:
+) -> Group | None:
     """Generate a group and either return it or recycle it.
 
     The rid is set inside ``generate`` (next to ``lora_path``) for multi-LoRA
@@ -59,11 +73,11 @@ async def process_group(
     result = await generate_fn(args, group, sampling_params)
 
     if submission_version is not None:
-        for s in result:
+        for s in iter_group_samples(result):
             s.metadata["slot_version"] = submission_version
 
-    if any(s.status == Sample.Status.ABORTED for s in result):
-        for s in result:
+    if any(s.status == Sample.Status.ABORTED for s in iter_group_samples(result)):
+        for s in iter_group_samples(result):
             s.reset_for_retry()
         # NOTE: re-queuing disabled for now. The per-adapter source is a
         # read-only RolloutDataSource whose add_samples raises RuntimeError, so
@@ -177,7 +191,7 @@ async def generate_rollout_multi_lora_async(
     # compare against a stale snapshot.
     max_staleness = getattr(args, "max_weight_staleness", None)
 
-    data: list[list[Sample]] = []
+    data: list[Group] = []
     stale_dropped = 0
     staleness_values: list[int] = []
     start_time = time.time()
@@ -193,13 +207,14 @@ async def generate_rollout_multi_lora_async(
                 group = worker.output_queue.get_nowait()
             except queue.Empty:
                 break
-            adapter_name = group[0].adapter.name if group and group[0].adapter else None
+            head = first_sample(group) if group else None
+            adapter_name = head.adapter.name if head is not None and head.adapter else None
             if adapter_name not in current_adapters:
                 # Adapter deregistered; its per-adapter source is gone, so the
                 # group cannot be recycled. Discard.
                 continue
             if max_staleness is not None:
-                stamped = group[0].metadata.get("slot_version")
+                stamped = head.metadata.get("slot_version")
                 if stamped is not None:
                     staleness = current_adapters[adapter_name].version - stamped
                     if staleness > max_staleness:
@@ -210,7 +225,7 @@ async def generate_rollout_multi_lora_async(
                         # source to RolloutDataSourceWithBuffer and uncomment the
                         # add_samples below (guard for cross-thread access — the
                         # worker pulls get_samples on its own thread).
-                        for s in group:
+                        for s in iter_group_samples(group):
                             s.reset_for_retry()
                         # try:
                         #     data_source.add_samples([group])
@@ -247,9 +262,11 @@ async def generate_rollout_multi_lora_async(
             f"max_staleness={max(staleness_values)}"
         )
 
-    data = sorted(data, key=lambda g: g[0].index)
+    data = sorted(data, key=lambda g: first_sample(g).index)
 
-    batch_adapters = sorted({g[0].adapter.name for g in data if g and g[0].adapter})
+    batch_adapters = sorted(
+        {first_sample(g).adapter.name for g in data if g and first_sample(g).adapter}
+    )
     if batch_adapters:
         await get_multi_lora_controller().record_batch_adapters.remote(rollout_id, batch_adapters)
 
@@ -258,7 +275,7 @@ async def generate_rollout_multi_lora_async(
 
     await recompute_samples_rollout_logprobs_via_prefill(
         args,
-        [s for g in data for s in g],
+        [s for g in data for s in iter_group_samples(g)],
         url=get_model_url(args, "default"),
         sampling_params=state.sampling_params,
     )
