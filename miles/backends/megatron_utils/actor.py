@@ -519,7 +519,7 @@ class MegatronTrainRayActor(TrainRayActor):
                         logger.info(f"Updating ref model at rollout_id {rollout_id}")
                     self.weights_backuper.backup("ref")
 
-        if is_multi_lora_enabled(self.args) and is_megatron_main_rank():
+        if is_multi_lora_enabled(self.args) and is_first_replica_megatron_main_rank():
             from miles.ray.multi_lora_controller import get_multi_lora_controller
 
             ray.get(get_multi_lora_controller().mark_batch_trained.remote(rollout_id))
@@ -547,7 +547,7 @@ class MegatronTrainRayActor(TrainRayActor):
         from miles.ray.multi_lora_controller import get_multi_lora_controller
 
         broadcast_buffer = [None]
-        if is_megatron_main_rank():
+        if is_first_replica_megatron_main_rank():
             controller = get_multi_lora_controller()
             ray.get(controller.retire_adapters.remote())
             broadcast_buffer[0] = ray.get(controller.snapshot.remote())
@@ -574,7 +574,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weights_backuper.backup("actor")
 
         # Deregistered before ever being loaded: nothing to save or clear.
-        if is_megatron_main_rank():
+        if is_first_replica_megatron_main_rank():
             for name in cleanup_names - loaded_names:
                 ray.get(get_multi_lora_controller().free_slot.remote(name))
 
@@ -605,7 +605,7 @@ class MegatronTrainRayActor(TrainRayActor):
             # save_interval unset means no periodic cadence; adapters still get
             # final checkpoints on deregistration.
             due_buffer = [None]
-            if is_megatron_main_rank() and self.args.save_interval is not None:
+            if is_first_replica_megatron_main_rank() and self.args.save_interval is not None:
                 snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
                 adapters = {**snapshot["active"], **snapshot["retiring"]}
                 due_buffer[0] = {

@@ -304,7 +304,7 @@ def load_adapters(args, model, optimizer, adapters) -> int:
     """Load a caller-provided list of adapters into Megatron slots. Each adapter
     is a ``RegisteredAdapter`` (name, config, slot). When resuming from a
     checkpoint, sets the controller's step count to the checkpoint's step."""
-    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
+    from miles.backends.megatron_utils.initialize import is_first_replica_megatron_main_rank
     from miles.utils.distributed_utils import get_gloo_group
 
     if dist.is_initialized():
@@ -317,7 +317,7 @@ def load_adapters(args, model, optimizer, adapters) -> int:
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
     optimizer.reload_model_params()
-    if is_megatron_main_rank():
+    if is_first_replica_megatron_main_rank():
         for name, step in resume_steps.items():
             if step > 0:
                 ray.get(get_multi_lora_controller().set_adapter_step.remote(name, step))
@@ -330,7 +330,7 @@ def cleanup_adapters(args, model, optimizer, adapters) -> int:
     slot was held by ``deregister_adapter`` (called by the data source at
     num_row); this frees it for reuse after the ckpt is saved. Called by the
     trainer's reconcile for adapters no longer active."""
-    from miles.backends.megatron_utils.initialize import is_megatron_main_rank
+    from miles.backends.megatron_utils.initialize import is_first_replica_megatron_main_rank
     from miles.utils.distributed_utils import get_gloo_group
 
     if dist.is_initialized():
@@ -341,7 +341,7 @@ def cleanup_adapters(args, model, optimizer, adapters) -> int:
         _deregister_adapter(adapter, args, model, optimizer)
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
-    if is_megatron_main_rank():
+    if is_first_replica_megatron_main_rank():
         for adapter in adapters:
             ray.get(get_multi_lora_controller().free_slot.remote(adapter.name))
     return len(adapters)
