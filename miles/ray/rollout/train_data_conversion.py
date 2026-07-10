@@ -126,11 +126,12 @@ def _post_process_rewards(args, samples: list[Sample] | list[list[Sample]], cust
 
 def split_train_data_by_dp(args, data, dp_size):
     """Split the train data by data parallel size."""
-    rollout_data = {}
+    rollout_data_list = split_train_data_by_dp_raw(args, data, dp_size=dp_size)
+    return [Box(ray.put(rollout_data)) for rollout_data in rollout_data_list]
 
-    if "prompt" in data:
-        rollout_data["prompt"] = data["prompt"]
 
+def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> list[dict[str, Any]]:
+    """Split the train data by data parallel size."""
     total_lengths = [len(t) for t in data["tokens"]]
     data["total_lengths"] = total_lengths
 
@@ -146,6 +147,7 @@ def split_train_data_by_dp(args, data, dp_size):
         partitions = [sorted(p, key=lambda i: adapter_slots[i]) for p in partitions]
 
     rollout_data_refs = []
+    ans = []
 
     for i in range(dp_size):
         rollout_data = {}
@@ -166,6 +168,7 @@ def split_train_data_by_dp(args, data, dp_size):
             "prompt",
             "teacher_log_probs",
             "opd_reverse_kl",
+            "seq_witness_ids",
             "weight_versions",
             "adapter_slots",
         ]:
@@ -184,5 +187,5 @@ def split_train_data_by_dp(args, data, dp_size):
             rollout_data[key] = data[key]
         if "adapter_slots" in rollout_data:
             rollout_data["n_adapters"] = args.multi_lora_n_adapters
-        rollout_data_refs.append(Box(ray.put(rollout_data)))
-    return rollout_data_refs
+        ans.append(rollout_data)
+    return ans
