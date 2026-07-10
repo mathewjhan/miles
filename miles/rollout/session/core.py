@@ -8,6 +8,7 @@ HTTP-agnostic: the FastAPI adapter (``sessions.py`` + ``server.py``) turns each 
 - ``chat_completions`` holds the per-session lock for prep and state update but not across the proxy call; ``closing`` re-checks and the ``num_assistant`` check gate concurrent DELETE/chat.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -260,6 +261,23 @@ class SessionCore:
 
         completion_token_ids = [t[1] for t in output_token_logprobs]
 
+        # Re-decode the assistant turn from the ground-truth completion tokens
+        # and store it as plain text (no structured tool_calls): chat templates
+        # (e.g. qwen3) do not round-trip parsed tool calls back to the emitted
+        # text, so storing the decoded text keeps the trajectory's message view
+        # consistent with what the model actually produced. The client receives
+        # the same text, so replayed histories match the stored ones verbatim.
+        decoded_text = await asyncio.to_thread(
+            self.registry.tokenizer.decode, completion_token_ids, skip_special_tokens=True
+        )
+        choice["message"]["content"] = decoded_text
+        stored_assistant_message = {
+            "role": "assistant",
+            "content": decoded_text,
+            "tool_calls": None,
+            "reasoning_content": None,
+        }
+
         # --- Phase 3: update state (lock held briefly) ---
         async with session.lock:
             if session.closing:
@@ -276,7 +294,7 @@ class SessionCore:
 
             session.update_pretokenized_state(
                 request_messages,
-                assistant_message,
+                stored_assistant_message,
                 prompt_token_ids=prompt_token_ids,
                 completion_token_ids=completion_token_ids,
                 max_trim_tokens=self.registry.tito_tokenizer.max_trim_tokens,
