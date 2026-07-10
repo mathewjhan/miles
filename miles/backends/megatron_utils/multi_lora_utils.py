@@ -281,10 +281,13 @@ def _deregister_adapter(adapter: RegisteredAdapter, args, model, optimizer) -> N
     slot = adapter.slot
     log_prefix = f"[multilora] ({name})"
 
-    # The controller still holds the step count until free_slot runs.
-    step = ray.get(get_multi_lora_controller().adapter_step.remote(name))
-    save_multi_lora_checkpoints(args, model, {name: step}, {name: adapter})
-    logger.info(f"{log_prefix} saved final checkpoint at step {step}")
+    if args.save_interval is not None:
+        # The controller still holds the step count until free_slot runs.
+        step = ray.get(get_multi_lora_controller().adapter_step.remote(name))
+        save_multi_lora_checkpoints(args, model, {name: step}, {name: adapter})
+        logger.info(f"{log_prefix} saved final checkpoint at step {step}")
+    else:
+        logger.info(f"{log_prefix} save_interval unset; skipping final checkpoint")
 
     # Clear out the multilora slot in the multilora layer in the Megatron model
     clear_adapter_slot(model, slot)
