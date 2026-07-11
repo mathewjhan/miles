@@ -1,7 +1,6 @@
 import logging
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import nullcontext
 from typing import Any
 
 import ray
@@ -15,7 +14,6 @@ from miles.backends.megatron_utils.lora_utils import (
     is_lora_weight_name,
     lora_base_cpu_backup_enabled,
 )
-from miles.backends.megatron_utils.multi_lora_utils import is_multi_lora_enabled
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.lora import LORA_ADAPTER_NAME
@@ -61,8 +59,6 @@ class UpdateWeightFromTensor:
         self.quantization_config = quantization_config
         self.weight_version = 0
         self.is_lora = is_lora
-        self.is_multi_lora = is_multi_lora_enabled(args)
-        self.multi_lora_adapters = None
         self._lora_loaded = False
         self._lora_name = LORA_ADAPTER_NAME
 
@@ -229,26 +225,15 @@ class UpdateWeightFromTensor:
         megatron_local_weights = self.weights_getter()
 
         if not skip_base_sync:
-            base_ctx = nullcontext()
-            if self.is_multi_lora:
-                # For multi_lora, hide the multi-adapter layer entirely so it doesn't
-                # intefere with the hf_weight_iterator
-                from megatron.bridge.peft.multi_lora_layers import hide_adapters
+            for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
+                megatron_local_weights, weight_type="base"
+            ):
+                refs, long_lived_tensors = self._send_base_params(hf_named_tensors)
+                results = ray.get(refs)
+                _check_weight_sync_results(results, is_lora=False)
+                del long_lived_tensors
 
-                base_ctx = hide_adapters(self.model)
-
-            with base_ctx:
-                for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
-                    megatron_local_weights, weight_type="base"
-                ):
-                    refs, long_lived_tensors = self._send_base_params(hf_named_tensors)
-                    results = ray.get(refs)
-                    _check_weight_sync_results(results, is_lora=False)
-                    del long_lived_tensors
-
-        if self.is_multi_lora:
-            self._send_multi_lora_params()
-        elif self.is_lora:
+        if self.is_lora:
             # SGLang's load_lora_adapter_from_tensors expects the full adapter in
             # one call; drain the bridge's chunker so --update-weight-buffer-size
             # only bounds the base path.
@@ -323,70 +308,6 @@ class UpdateWeightFromTensor:
             self._lora_loaded = True
             return refs or [], long_lived_tensors
 
-    def _send_multi_lora_params(self) -> None:
-        """Per-cycle SGLang sync for every adapter the controller knows about.
-
-        Runs inside ``update_weights()``'s pause/flush/continue bracket, so
-        every ipc_engine call here is safe.
-
-        Per adapter:
-        - RUNNING: push weights with ``upsert=True`` -- SGLang registers the
-          adapter on first push and overwrites it in place on every later push
-          (no unload/register). Adapters are never unloaded, so there is no
-          drain/``wait_for_unload`` hang.
-        - Model-side cleanup (Megatron slot + optimizer
-          state) is handled by the trainer's reconcile; the SGLang slot is retained
-          for reuse by the next adapter.
-        """
-        from miles.ray.multi_lora_controller import get_multi_lora_controller
-
-        adapters = self.multi_lora_adapters
-        assert adapters is not None, "actor must set multi_lora_adapters before update_weights"
-        for name in sorted(adapters):
-            self.send_one_multi_lora_adapter(adapters[name], upsert=True)
-
-        if dist.get_rank() == 0 and adapters:
-            ray.get(get_multi_lora_controller().record_weight_update.remote(sorted(adapters)))
-
-    def send_one_multi_lora_adapter(self, adapter, upsert: bool) -> None:
-        """Push one adapter's weights to SGLang. ``upsert=True``: SGLang
-        registers the adapter on first push and overwrites it in place on every
-        later push (no unload/register)."""
-        from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
-
-        from miles.backends.megatron_utils.multi_lora_utils import slice_lora_to_rank
-
-        config = adapter.config
-        adapter_rank = config.rank
-        lora_config = build_lora_sync_config(self.args)
-        lora_config["r"] = adapter_rank
-        lora_config["lora_alpha"] = config.alpha
-
-        with expose_adapter_slot(self.model, adapter.slot):
-            megatron_local_weights = self.weights_getter()
-            for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
-                megatron_local_weights, weight_type="lora"
-            ):
-                weight_tensors = [
-                    (n, slice_lora_to_rank(n, t, adapter_rank)) for n, t in hf_named_tensors if is_lora_weight_name(n)
-                ]
-                if not weight_tensors:
-                    continue
-                refs, long_lived_tensors = _send_to_colocated_engine(
-                    hf_named_tensors=weight_tensors,
-                    ipc_engine=self._ipc_engine,
-                    ipc_gather_src=self._ipc_gather_src,
-                    ipc_gather_group=self._ipc_gather_group,
-                    lora_config=lora_config,
-                    lora_name=f"__miles_slot_{adapter.slot}",
-                    lora_loaded=False,
-                    upsert=upsert,
-                )
-                if refs:
-                    _check_weight_sync_results(ray.get(refs), is_lora=True)
-                del long_lived_tensors
-
-
 def _send_to_colocated_engine(
     hf_named_tensors: list[tuple[str, torch.Tensor]],
     *,
@@ -397,7 +318,6 @@ def _send_to_colocated_engine(
     lora_config: dict | None = None,
     lora_name: str | None = None,
     lora_loaded: bool = False,
-    upsert: bool = False,
 ) -> tuple[list[ObjectRef], Any]:
     # Placeholder ranks (GPU slots reserved but no engine) have no gather group.
     # gather_object is only collective among group members, so we skip entirely.
@@ -455,7 +375,6 @@ def _send_to_colocated_engine(
                         per_rank[0] if per_rank else None for per_rank in serialized_named_tensors
                     ],
                     load_format="flattened_bucket",
-                    upsert=upsert,
                 )
             )
 

@@ -2541,6 +2541,10 @@ def miles_validate_args(args):
     if args.multi_lora:
         assert args.lora_rank > 0, "--lora-rank must be set when --multi-lora-n-adapters > 0"
         assert args.target_modules is not None, "--target-modules must be set when --multi-lora-n-adapters > 0"
+        assert not args.colocate, (
+            "Multi-LoRA requires disaggregated rollout engines: weight sync is only "
+            "implemented for the distributed path, not the colocated tensor path."
+        )
         args.megatron_to_hf_mode = "bridge"
 
     assert not (args.kl_coef != 0 and args.kl_loss_coef != 0), "Only one of kl_coef and kl_loss_coef can be set"
