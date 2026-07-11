@@ -11,7 +11,7 @@ from aiohttp import web
 
 from types import SimpleNamespace
 
-from miles.utils.adapter_config import AdapterConfig
+from miles.utils.adapter_config import AdapterRunConfig
 from miles.utils.multi_lora import RID_SEPARATOR, MultiLoRABackend, MultiLoRAHTTPServer
 
 
@@ -127,7 +127,7 @@ async def test_deregister_marks_and_retire_adapters_aborts():
 
 @pytest.mark.asyncio
 async def test_register_json_config_validates_to_adapter_config():
-    """FastAPI validates the JSON body straight into AdapterConfig (422 on bad
+    """FastAPI validates the JSON body straight into AdapterRunConfig (422 on bad
     payloads)."""
     async with running_controller() as ctl:
         config = {
@@ -139,7 +139,7 @@ async def test_register_json_config_validates_to_adapter_config():
         status, _ = await ctl.api_post("/adapters", {"name": "A", "config": config})
         assert status == 200
         record = ctl.backend.registry.find("A")
-        assert isinstance(record.config, AdapterConfig)
+        assert isinstance(record.config, AdapterRunConfig)
         assert record.config.data == "/data/train.parquet"
         assert Path(record.config.save) == Path("/tmp/adapters/A")
         assert record.config.input_key == "text"  # dataclass default

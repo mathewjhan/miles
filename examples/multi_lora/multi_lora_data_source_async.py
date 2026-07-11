@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import ray
 
 from miles.rollout.data_source import DataSource, RolloutDataSource
-from miles.utils.adapter_config import RegisteredAdapter
+from miles.utils.adapter_config import AdapterRun
 from miles.utils.types import AdapterRef, RewardSpec, Sample
 
 from miles.ray.multi_lora_controller import get_multi_lora_controller
@@ -23,7 +23,7 @@ def fetch_snapshot() -> dict:
     return ray.get(get_multi_lora_controller().snapshot.remote())
 
 
-def sampleable(snapshot: dict) -> dict[str, RegisteredAdapter]:
+def sampleable(snapshot: dict) -> dict[str, AdapterRun]:
     return {**snapshot["active"], **snapshot["retiring"]}
 
 
@@ -33,7 +33,7 @@ class MultiLoRAAsyncDataSource(DataSource):
         self.sources: dict[str, RolloutDataSource] = {}
         self.source_queue: deque = deque()
 
-    def reconcile(self, adapters: dict[str, RegisteredAdapter]) -> None:
+    def reconcile(self, adapters: dict[str, AdapterRun]) -> None:
         for name in list(self.sources):
             if name not in adapters:
                 del self.sources[name]
@@ -51,7 +51,7 @@ class MultiLoRAAsyncDataSource(DataSource):
                 logger.info(f"Created data source for adapter '{name}'")
         self.update_queue(set(adapters))
 
-    def create_source(self, adapter: RegisteredAdapter) -> RolloutDataSource:
+    def create_source(self, adapter: AdapterRun) -> RolloutDataSource:
         config = adapter.config
         adapter_args = copy.copy(self.args)
         adapter_args.prompt_data = config.data

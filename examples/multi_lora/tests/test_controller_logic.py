@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from miles.utils.adapter_config import AdapterConfig
+from miles.utils.adapter_config import AdapterRunConfig
 from miles.utils.multi_lora import AdapterRegistry, AdapterState, MultiLoRABackend, make_rid, parse_adapter
 
 
@@ -17,8 +17,8 @@ def make_backend(max_adapters: int = 4, save: str | None = None) -> MultiLoRABac
     return MultiLoRABackend(make_args(max_adapters, save), "http://unused")
 
 
-def make_config(save: str | None = None) -> AdapterConfig:
-    return AdapterConfig(rank=8, alpha=16, data="/d", save=save, input_key="text", label_key="label", rm_type="math")
+def make_config(save: str | None = None) -> AdapterRunConfig:
+    return AdapterRunConfig(rank=8, alpha=16, data="/d", save=save, input_key="text", label_key="label", rm_type="math")
 
 
 def register_and_promote(registry: AdapterRegistry, name: str, config=None) -> None:

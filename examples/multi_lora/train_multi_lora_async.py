@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
-from miles.utils.adapter_config import parse_adapter_yaml
+from miles.utils.adapter_config import parse_adapter_run_yaml
 from miles.utils.arguments import parse_args
 from miles.utils.audit_utils.process_identity import MainProcessIdentity
 from miles.utils.logging_utils import configure_logger
@@ -44,7 +44,7 @@ async def main(args):
     # CLI-registered adapters are loaded and pushed by the loop's first
     # reconcile + update_weights.
     for name, path in args.multi_lora_adapters:
-        config = parse_adapter_yaml(Path(path))
+        config = parse_adapter_run_yaml(Path(path))
         await controller.register_adapter.remote(name, config)
 
     rollout_id = 0

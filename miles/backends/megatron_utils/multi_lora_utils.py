@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.ray.multi_lora_controller import get_multi_lora_controller
-from miles.utils.adapter_config import RegisteredAdapter
+from miles.utils.adapter_config import AdapterRun
 from miles.utils.multi_lora import is_multi_lora_enabled as is_multi_lora_enabled
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,7 @@ def save_multi_lora_checkpoints(
     args,
     model,
     adapter_steps: Mapping[str, int],
-    adapters: Mapping[str, RegisteredAdapter],
+    adapters: Mapping[str, AdapterRun],
 ):
     """Save per-adapter checkpoints in two formats per adapter.
 
@@ -229,7 +229,7 @@ def save_multi_lora_checkpoints(
             dist.barrier()
 
 
-def _register_adapter(adapter: RegisteredAdapter, model) -> int:
+def _register_adapter(adapter: AdapterRun, model) -> int:
     """Install one adapter on this rank's local model shard. Returns the step
     of the checkpoint it resumed from (0 for a fresh adapter)."""
     from megatron.bridge.peft.multi_lora_layers import init_adapter_slot, load_adapter
@@ -263,7 +263,7 @@ def _register_adapter(adapter: RegisteredAdapter, model) -> int:
     return step
 
 
-def _deregister_adapter(adapter: RegisteredAdapter, args, model, optimizer) -> None:
+def _deregister_adapter(adapter: AdapterRun, args, model, optimizer) -> None:
     """Model-side cleanup for one adapter."""
     from megatron.bridge.peft.multi_lora_layers import clear_adapter_slot
 

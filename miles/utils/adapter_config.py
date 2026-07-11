@@ -1,7 +1,7 @@
 """Adapter config parsing for multi-LoRA training.
 
-``AdapterConfig`` carries only static, YAML-sourced configuration; the
-mutable slot is owned by the controller and exposed through ``RegisteredAdapter``
+``AdapterRunConfig`` carries only static, YAML-sourced configuration; the
+mutable slot is owned by the controller and exposed through ``AdapterRun``
 views.
 """
 
@@ -13,7 +13,7 @@ import yaml
 
 
 @dataclass(frozen=True)
-class AdapterConfig:
+class AdapterRunConfig:
 
     data: str
 
@@ -36,21 +36,17 @@ class AdapterConfig:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 @dataclass(frozen=True)
-class RegisteredAdapter:
-    """Join view of an adapter's static config and current slot.
-
-    Returned by the controller's ``active_adapters``. The controller is the
-    source of truth; this view is a read-only snapshot.
-    """
+class AdapterRun:
+    """Read-only join view of a run's static config and current slot."""
 
     name: str
-    config: AdapterConfig
+    config: AdapterRunConfig
     slot: int
     version: int = 0
     step: int = 0
 
 
-def parse_adapter_yaml(path: Path) -> AdapterConfig:
+def parse_adapter_run_yaml(path: Path) -> AdapterRunConfig:
     """Parse a single adapter.yaml file.
 
     ``rank``, ``alpha`` and ``save`` are optional in the YAML; when absent the
@@ -59,7 +55,7 @@ def parse_adapter_yaml(path: Path) -> AdapterConfig:
     with open(path) as f:
         raw = yaml.safe_load(f)
 
-    return AdapterConfig(
+    return AdapterRunConfig(
         rank=raw.get("rank"),
         alpha=raw.get("alpha"),
         data=raw["data"],

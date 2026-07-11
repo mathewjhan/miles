@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from miles.utils.adapter_config import AdapterConfig, RegisteredAdapter, parse_adapter_yaml
+from miles.utils.adapter_config import AdapterRunConfig, AdapterRun, parse_adapter_run_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -193,8 +193,8 @@ class AdapterRegistry:
         record = self.find(name)
         return record.step if record is not None else 0
 
-    def view(self, record: AdapterRecord) -> RegisteredAdapter:
-        return RegisteredAdapter(
+    def view(self, record: AdapterRecord) -> AdapterRun:
+        return AdapterRun(
             name=record.name,
             config=record.config,
             slot=record.slot,
@@ -202,7 +202,7 @@ class AdapterRegistry:
             step=record.step,
         )
 
-    def active_adapters(self) -> dict[str, RegisteredAdapter]:
+    def active_adapters(self) -> dict[str, AdapterRun]:
         """Sampleable view: RETIRING keeps serving until retired."""
         return {
             name: self.view(record)
@@ -210,7 +210,7 @@ class AdapterRegistry:
         }
 
     def snapshot(self) -> dict:
-        def views(state: AdapterState) -> dict[str, RegisteredAdapter]:
+        def views(state: AdapterState) -> dict[str, AdapterRun]:
             return {name: self.view(record) for name, record in self.in_state(state).items()}
 
         return {
@@ -308,7 +308,7 @@ class RegisterAdapterRequest(BaseModel):
     """Exactly one of ``config`` (inline) or ``yaml_path`` must be set."""
 
     name: str
-    config: AdapterConfig | None = None
+    config: AdapterRunConfig | None = None
     yaml_path: str | None = None
 
 
@@ -401,7 +401,7 @@ class MultiLoRAHTTPServer:
         if (request.config is None) == (request.yaml_path is None):
             raise HTTPException(status_code=400, detail="Exactly one of 'config' or 'yaml_path' must be set")
         if request.yaml_path is not None:
-            config = parse_adapter_yaml(Path(request.yaml_path))
+            config = parse_adapter_run_yaml(Path(request.yaml_path))
         else:
             config = request.config
         return await self.backend.register(request.name, config)

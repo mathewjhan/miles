@@ -6,7 +6,7 @@ from typing import Any
 
 import ray
 
-from miles.utils.adapter_config import RegisteredAdapter
+from miles.utils.adapter_config import AdapterRun
 from miles.utils.misc import SingletonMeta, get_current_node_ip, load_function
 from miles.utils.multi_lora import MultiLoRABackend, MultiLoRAHTTPServer
 from miles.utils.ray_utils import compute_ray_pin_head_options
@@ -39,11 +39,11 @@ class AdaptersCache(metaclass=SingletonMeta):
                 pass
         return self.snapshot
 
-    async def get_all(self) -> dict[str, "RegisteredAdapter"]:
+    async def get_all(self) -> dict[str, "AdapterRun"]:
         snapshot = await self.get_snapshot()
         return {**snapshot["active"], **snapshot["retiring"]}
 
-    async def get(self, adapter_name: str) -> "RegisteredAdapter | None":
+    async def get(self, adapter_name: str) -> "AdapterRun | None":
         return (await self.get_all()).get(adapter_name)
 
 
