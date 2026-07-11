@@ -1,11 +1,4 @@
-"""Multi-LoRA data source for the fully-async design.
-
-Reads the controller snapshot (RegisteredAdapter views,
-state=RUNNING — no state machine), round-robins over per-adapter prompt
-sources, tags samples with ``AdapterRef``/``RewardSpec``, and calls
-``controller.deregister_adapter`` when an adapter reaches its ``num_row``.
-Recycles aborted/dummied groups back to the per-adapter source. No drain states.
-"""
+"""Round-robin per-adapter data source; deregisters adapters at num_row."""
 
 import copy
 import logging

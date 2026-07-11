@@ -216,15 +216,8 @@ def save_multi_lora_checkpoints(
         if dist.is_initialized():
             dist.barrier()
 
-        # to avoid partially complete checkpoints, move the checkpoint to the
-        # actual directory after everything is complete
-        #
-        # TODO(mathewjhan): it could be nice to have a callback that checks when all
-        # checkpoints are available in final_dir and writes a final marker file to the folder,
-        # useful for distributed file systems and verifying that the checkpoint is complete
-        # Currently, this only guarantees that the trainer processes have written everything,
-        # but doesn't account for the actual visibility of each checkpoint shard on every
-        # node due to network latency, consistency semantics, etc
+        # Write to a temp dir and move into place so readers never see a
+        # partially written checkpoint.
         if is_global_writer:
             if final_dir.exists():
                 import shutil
@@ -286,21 +279,17 @@ def _deregister_adapter(adapter: RegisteredAdapter, args, model, optimizer) -> N
     else:
         logger.info(f"{log_prefix} save_interval unset; skipping final checkpoint")
 
-    # Clear out the multilora slot in the multilora layer in the Megatron model
     clear_adapter_slot(model, slot)
     logger.info(f"{log_prefix} cleared adapter slot {slot}")
 
-    # Zero out the optimizer state to prevent future adapters from reusing previous adapter
-    # momentum, etc
+    # Prevent future slot tenants from inheriting optimizer momentum.
     zero_optimizer_state_for_adapter(optimizer, model, slot)
     optimizer.reload_model_params()
     logger.info(f"{log_prefix} cleared optimizer state for slot {slot}")
 
 
 def load_adapters(args, model, optimizer, adapters) -> int:
-    """Load a caller-provided list of adapters into Megatron slots. Each adapter
-    is a ``RegisteredAdapter`` (name, config, slot). When resuming from a
-    checkpoint, sets the controller's step count to the checkpoint's step."""
+    """Load adapters into Megatron slots; resumes step counts from checkpoints."""
     from miles.backends.megatron_utils.initialize import is_first_replica_megatron_main_rank
     from miles.utils.distributed_utils import get_gloo_group
 
@@ -322,11 +311,7 @@ def load_adapters(args, model, optimizer, adapters) -> int:
 
 
 def cleanup_adapters(args, model, optimizer, adapters) -> int:
-    """Save checkpoint + clear Megatron slot for a caller-provided list of
-    adapters, then free their held slots on the controller (``free_slot``). The
-    slot was held by ``deregister_adapter`` (called by the data source at
-    num_row); this frees it for reuse after the ckpt is saved. Called by the
-    trainer's reconcile for adapters no longer active."""
+    """Save final ckpt + clear Megatron slot, then free_slot on the controller."""
     from miles.backends.megatron_utils.initialize import is_first_replica_megatron_main_rank
     from miles.utils.distributed_utils import get_gloo_group
 

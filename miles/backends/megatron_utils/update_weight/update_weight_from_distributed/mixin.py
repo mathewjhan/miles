@@ -70,18 +70,14 @@ class DistBucketedWeightUpdateMixin:
     ) -> None:
         """Initialize LoRA-specific state. Call from subclass ``__init__``."""
         self.is_lora = is_lora
-        # Multi-LoRA: the loaded-adapter map captured by the actor at reconcile;
-        # set before each update_weights call.
+        # Set by the actor before each update_weights call (loaded map at reconcile).
         self.multi_lora_adapters = None
         if self.is_lora:
-            # Distributed LoRA sync requires the bridge iterator
             assert args.megatron_to_hf_mode == "bridge", (
                 "LoRA weight sync over distributed engines requires "
                 f"--megatron-to-hf-mode bridge (got {args.megatron_to_hf_mode!r})."
             )
-            # The bridge exports adapters per local (PP-stage) model, so a single
-            # source rank holds the complete adapter only at PP=1. With PP>1 each
-            # stage would broadcast a partial adapter, so reject it explicitly.
+            # With PP>1 no single rank holds the complete adapter.
             assert args.pipeline_model_parallel_size == 1, (
                 "LoRA weight sync over distributed engines requires "
                 f"--pipeline-model-parallel-size 1 (got {args.pipeline_model_parallel_size})."
@@ -239,8 +235,6 @@ class DistBucketedWeightUpdateMixin:
         but only the source rank transmits.
         """
         # All ranks must iterate the bridge for TP collective participation.
-        # {} weights: bridge exports adapters directly from self.model and ignores
-        # this dict (bridge-only is enforced in _init_lora).
         accumulated_named_tensors: list[tuple[str, torch.Tensor]] = []
         for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks({}, weight_type="lora"):
             accumulated_named_tensors.extend(hf_named_tensors)
@@ -261,7 +255,6 @@ class DistBucketedWeightUpdateMixin:
                 "(no lora_A/lora_B names found). Check weight iterator."
             )
 
-        # Load once, then refresh in place -- never unload (see _update_multi_lora_weights).
         self._update_lora_weight_implementation(
             accumulated_named_tensors,
             upsert=self._lora_loaded,
@@ -269,18 +262,9 @@ class DistBucketedWeightUpdateMixin:
         self._lora_loaded = True
 
     def _update_multi_lora_weights(self) -> None:
-        """Push every adapter the trainer has loaded, then report exactly that
-        set to the controller (bumping slot versions and promoting pending
-        adapters to running).
-
-        The push set is ``multi_lora_adapters`` — the loaded map the actor
-        captured at reconcile — not a fresh controller query: pushing must
-        cover exactly what is in the Megatron slots, and the loaded map is
-        identical on every rank so the per-adapter TP collectives in
-        ``_send_one_multi_lora_adapter`` line up. Every send uses
-        ``upsert=True``; adapters are never unloaded (no drain, no
-        ``wait_for_unload`` hang).
-        """
+        """Push every loaded adapter (upsert, never unload), then report the
+        set to the controller. The push set is the reconcile-time loaded map,
+        identical on every rank, so per-adapter TP collectives line up."""
         from miles.ray.multi_lora_controller import get_multi_lora_controller
 
         adapters = self.multi_lora_adapters
@@ -292,14 +276,8 @@ class DistBucketedWeightUpdateMixin:
             ray.get(get_multi_lora_controller().record_weight_update.remote(sorted(adapters)))
 
     def _send_one_multi_lora_adapter(self, adapter, upsert: bool) -> None:
-        """Export and transmit one adapter's weights.
-
-        Every rank exposes the adapter's slot and iterates the bridge (the export
-        runs TP all-gather internally, so all ranks must participate); only the
-        source rank validates and transmits via ``_update_lora_weight_implementation``
-        with this adapter's name and config. ``upsert`` selects an
-        in-place overwrite of an already-loaded adapter (no unload/register).
-        """
+        """All ranks iterate the bridge (TP collectives); only the source
+        rank transmits."""
         from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
 
         from ...multi_lora_utils import slice_lora_to_rank

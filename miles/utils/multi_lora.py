@@ -1,11 +1,4 @@
-"""Multi-LoRA backend + control-plane HTTP server (no Ray, no torch).
-
-``MultiLoRABackend`` is the shared brain behind two thin transports: the
-``MultiLoRAController`` Ray actor and the ``MultiLoRAHTTPServer`` here.
-Control plane only — generation traffic goes to the router directly; on
-deregister, one prefix abort (``rid = "{name}::"``) per worker reclaims the
-adapter's in-flight requests.
-"""
+"""Multi-LoRA adapter registry, backend, and control-plane HTTP server."""
 
 import asyncio
 import logging
@@ -38,13 +31,9 @@ __all__ = [
 ]
 
 
-# Separator between adapter name and request uuid in rids. Must not appear in
-# adapter names (enforced at registration) so that rid prefix matching in
-# SGLang's abort_request cannot hit another adapter's requests.
+# Must not appear in adapter names so rid prefix aborts can't cross adapters.
 RID_SEPARATOR = "::"
 
-# Names become rid prefixes and filesystem path components (default save dirs),
-# so restrict them to a path- and separator-safe alphabet.
 VALID_ADAPTER_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -61,14 +50,14 @@ def parse_adapter(rid: str) -> str:
 
 
 class AdapterState(str, Enum):
-    PENDING = "PENDING"  # registered, weights not yet synced
-    ACTIVE = "ACTIVE"  # weights synced at least once — sampleable
-    RETIRING = "RETIRING"  # deregistered, still serving until the next reconcile
-    CLEANUP = "CLEANUP"  # being torn down (final ckpt, slot clear)
-    COMPLETED = "COMPLETED"  # slot freed; record retained for status queries
+    PENDING = "PENDING"
+    ACTIVE = "ACTIVE"
+    RETIRING = "RETIRING"
+    CLEANUP = "CLEANUP"
+    COMPLETED = "COMPLETED"
 
 
-# States that hold a slot (everything but COMPLETED).
+# States that hold a slot.
 LIVE_STATES = (
     AdapterState.PENDING,
     AdapterState.ACTIVE,
@@ -86,18 +75,13 @@ class AdapterRecord:
     state: AdapterState = AdapterState.PENDING
 
 
-# Retained batch records, bounding leakage from cycles that crash before
-# mark_batch_trained.
 MAX_BATCH_RECORDS = 16
-
-# LRU-retained COMPLETED records (reads refresh recency).
 MAX_COMPLETED_RECORDS = 1024
 
 
 class AdapterRegistry:
-    """One record per name, each carrying its ``AdapterState``; views are
-    filters and transitions are single state assignments. ``slot_versions``
-    count pushes per slot and never reset, so (slot, version) never recurs."""
+    """One record per name; ``slot_versions`` never reset, so (slot, version)
+    never recurs across slot reuse."""
 
     def __init__(self, max_adapters: int) -> None:
         self.max_adapters = max_adapters
@@ -110,7 +94,6 @@ class AdapterRegistry:
         return {name: r for name, r in self.records.items() if r.state in states}
 
     def find(self, name: str) -> AdapterRecord | None:
-        """The slot-holding record for a name (COMPLETED records excluded)."""
         record = self.records.get(name)
         return record if record is not None and record.state in LIVE_STATES else None
 
@@ -139,7 +122,7 @@ class AdapterRegistry:
             raise RuntimeError(f"No free adapter slots (max {self.max_adapters})")
         slot = min(self.free_slots)
         self.free_slots.remove(slot)
-        self.records.pop(name, None)  # drop a stale COMPLETED record
+        self.records.pop(name, None)
         self.records[name] = AdapterRecord(name=name, slot=slot, config=config)
         return {"name": name, "slot": slot}
 
@@ -160,7 +143,7 @@ class AdapterRegistry:
             return -1
         self.free_slots.add(record.slot)
         record.state = AdapterState.COMPLETED
-        self.records[name] = self.records.pop(name)  # LRU: reinsert at the end
+        self.records[name] = self.records.pop(name)
         completed = self.in_state(AdapterState.COMPLETED)
         for oldest in list(completed)[: len(completed) - MAX_COMPLETED_RECORDS]:
             self.records.pop(oldest)
@@ -171,12 +154,11 @@ class AdapterRegistry:
         if record is None:
             return None
         if record.state is AdapterState.COMPLETED:
-            self.records[name] = self.records.pop(name)  # LRU touch
+            self.records[name] = self.records.pop(name)
         return record.state
 
     def record_weight_update(self, names: list[str]) -> None:
-        """Weights for these adapters were pushed to the engines: bump their
-        slot versions and promote any pending ones to active."""
+        """A weight push landed: bump slot versions, promote PENDING to ACTIVE."""
         for name in names:
             record = self.find(name)
             if record is None:
@@ -221,16 +203,13 @@ class AdapterRegistry:
         )
 
     def active_adapters(self) -> dict[str, RegisteredAdapter]:
-        """The sampleable view: retiring adapters keep serving until retired."""
+        """Sampleable view: RETIRING keeps serving until retired."""
         return {
             name: self.view(record)
             for name, record in self.in_state(AdapterState.ACTIVE, AdapterState.RETIRING).items()
         }
 
     def snapshot(self) -> dict:
-        """Atomic per-state view. The trainer keeps pending/active/retiring
-        loaded and tears down cleanup."""
-
         def views(state: AdapterState) -> dict[str, RegisteredAdapter]:
             return {name: self.view(record) for name, record in self.in_state(state).items()}
 
@@ -245,10 +224,8 @@ class AdapterRegistry:
 
 
 class MultiLoRABackend:
-    """Shared brain behind the Ray actor and the HTTP server: adapter registry
-    plus engine-facing abort (via the router's worker list). Subclass
-    (``--multi-lora-backend-path``) and override ``validate_adapter`` to
-    reject registrations."""
+    """Registry + engine-facing aborts, shared by the Ray actor and HTTP server.
+    Subclass via --multi-lora-backend-path."""
 
     def __init__(self, args: Any, router_url: str) -> None:
         self.args = args
@@ -268,8 +245,6 @@ class MultiLoRABackend:
         """Override to reject adapter registrations (raise ValueError)."""
 
     def resolve_save_dir(self, name: str, config: Any) -> Any:
-        """Default a missing per-adapter save dir to {args.save}/adapters/{name};
-        an explicit config.save is kept as-is."""
         if config is None or not hasattr(config, "save"):
             return config
         if config.save is not None:
@@ -313,7 +288,6 @@ class MultiLoRABackend:
         return []
 
     async def abort_adapter_requests(self, adapter_name: str) -> None:
-        """Abort the adapter's in-flight requests: one prefix abort per worker."""
         prefix = f"{adapter_name}{RID_SEPARATOR}"
         urls = await self.worker_urls()
         if not urls:
@@ -339,12 +313,8 @@ class RegisterAdapterRequest(BaseModel):
 
 
 class MultiLoRAHTTPServer:
-    """FastAPI control plane over a ``MultiLoRABackend``, served by an embedded
-    uvicorn: register/deregister/active plus whatever subclasses add. No data
-    plane — generation traffic goes to the inference router directly.
-
-    Subclasses (``--multi-lora-http-server-path``) override ``add_routes`` for
-    extra endpoints and ``create_app`` for middlewares (e.g. auth)."""
+    """Control-plane API over a MultiLoRABackend. Subclass via
+    --multi-lora-http-server-path (add_routes / create_app)."""
 
     def __init__(self, backend, host="127.0.0.1", api_port=0):
         self.backend = backend
@@ -376,8 +346,7 @@ class MultiLoRAHTTPServer:
     def add_routes(self, app: FastAPI) -> None:
         app.get("/health")(self.health)
         app.get("/adapters")(self.list_adapters)
-        # Registered before /adapters/{name} so "state" is not read as a name.
-        app.get("/adapters/state")(self.adapter_states)
+        app.get("/adapters/state")(self.adapter_states)  # before /adapters/{name}
         app.get("/adapters/{name}")(self.get_adapter)
         app.post("/adapters")(self.register_adapter)
         app.delete("/adapters/{name}")(self.deregister_adapter)
@@ -404,7 +373,6 @@ class MultiLoRAHTTPServer:
         return {"status": "healthy"}
 
     def adapter_statuses(self) -> list[dict]:
-        """RegisteredAdapter views flattened into the wire shape."""
         registry = self.backend.registry
         statuses = []
         for record in registry.records.values():
@@ -413,7 +381,7 @@ class MultiLoRAHTTPServer:
             flat["save"] = str(flat["save"])
             flat["state"] = record.state
             if record.state is AdapterState.COMPLETED:
-                flat["version"] = None  # freed slot; counter may be another tenant's
+                flat["version"] = None
             statuses.append(flat)
         return statuses
 

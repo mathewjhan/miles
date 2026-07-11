@@ -1,18 +1,4 @@
-"""Custom fully-async multi-LoRA trainer.
-
-Drives the controller (Ray actor + control-plane HTTP API) with no drain and no
-rollout-id tracking:
-  - create the controller (registry + API; generation traffic goes straight to
-    the router),
-  - register adapters from CLI (parse YAML -> AdapterConfig) + load into Megatron
-    slots via ``actor_model.load_adapters``,
-  - loop: read the controller snapshot, reconcile (retire + clean up),
-    collect a batch from the continuous rollout, train, upsert via ``update_weights``,
-  - the data source deregisters adapters at num_row; the trainer cleans them up
-    (save ckpt + clear slot + free) on reconcile.
-
-Compile-checked only; needs torch + Ray + SGLang to run.
-"""
+"""Fully-async multi-LoRA trainer driver."""
 
 import asyncio
 import logging
@@ -55,11 +41,8 @@ async def main(args):
 
     actor_model, _ = await create_training_models(args, pgs, rollout_manager)
 
-    # Register adapters from CLI. The loop's first reconcile_adapters loads them
-    # into Megatron slots and the first update_weights upserts their initial
-    # weights, so the first rollout uses the adapter weights. In service mode the
-    # trainer idle-waits for registrations; with --multi-lora-disable-service-mode
-    # it exits when no adapters are active.
+    # CLI-registered adapters are loaded and pushed by the loop's first
+    # reconcile + update_weights.
     for name, path in args.multi_lora_adapters:
         config = parse_adapter_yaml(Path(path))
         await controller.register_adapter.remote(name, config)
@@ -75,15 +58,12 @@ async def main(args):
             await asyncio.sleep(args.multi_lora_idle_poll_s)
             continue
 
-        # Reconcile (load active+pending, cleanup deregistered) then push
-        # BEFORE generate. The weight updater reports what it pushed, which
-        # promotes pending adapters to active — only then does the data
-        # source start sampling them.
+        # Reconcile + push before generate: the push promotes pending adapters,
+        # and only then does the data source sample them.
         await actor_model.reconcile_adapters()
         await actor_model.update_weights()
 
-        # Reconcile may have cleaned up the last adapters (e.g. num_row reached):
-        # with nothing active, generate would wait forever for a batch.
+        # With nothing active, generate would wait forever.
         post_update = await get_multi_lora_controller().snapshot.remote()
         if not (post_update["active"] or post_update["retiring"]):
             continue
@@ -91,8 +71,7 @@ async def main(args):
         rollout_data = await rollout_manager.generate.remote(rollout_id)
         await actor_model.train(rollout_id, rollout_data)
 
-        # Save cadence is per adapter, decided inside save_model from each
-        # adapter's own step count; deregistration cleanup saves final ckpts.
+        # Per-adapter save cadence decided inside save_model.
         await actor_model.save_model(rollout_id)
 
         rollout_id += 1

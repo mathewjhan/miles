@@ -1,9 +1,4 @@
-"""Custom fully-async multi-LoRA rollout function.
-
-Mirrors ``examples/fully_async/fully_async_rollout.py`` (continuous background
-producer + collect-a-batch) for multi-LoRA. Engine-side prefix aborts on
-deregister surface here as ``Sample.Status.ABORTED`` groups, which are dropped.
-"""
+"""Fully-async multi-LoRA rollout: continuous background producer + collect-a-batch."""
 
 import asyncio
 import itertools
@@ -33,8 +28,7 @@ logger = logging.getLogger(__name__)
 
 GenerateFn = Callable[..., Any]
 
-# Custom generate fns may return several samples per rollout; the nesting is
-# kept intact here and flattened later by the rollout manager.
+# Generate fns may return several samples per rollout; the manager flattens later.
 Group = list[Sample | list[Sample]]
 
 
@@ -49,16 +43,8 @@ def first_sample(group: Group) -> Sample:
 async def process_group(
     args, group: list[Sample], sampling_params: dict, generate_fn: GenerateFn, data_source
 ) -> Group | None:
-    """Generate a group and either return it or recycle it.
-
-    The rid is set inside ``generate`` (next to ``lora_path``) for multi-LoRA
-    samples, so nothing here stamps it. Returns the completed group if it should
-    be trained, or None if it was aborted/dummied (recycled back to
-    ``data_source``).
-
-    The slot version is stamped at *submission*: the staleness filter needs the
-    version live when the request was sent, not the one after generation.
-    """
+    """Generate a group; returns None for aborted groups. The slot version is
+    stamped at submission time (what the staleness filter compares against)."""
     adapter_name = group[0].adapter.name if group and group[0].adapter else None
     submission_version: int | None = None
     if adapter_name is not None:
@@ -78,14 +64,7 @@ async def process_group(
     if any(s.status == Sample.Status.ABORTED for s in iter_group_samples(result)):
         for s in iter_group_samples(result):
             s.reset_for_retry()
-        # NOTE: re-queuing disabled for now. The per-adapter source is a
-        # read-only RolloutDataSource whose add_samples raises RuntimeError, so
-        # the group is dropped. Switch the source to RolloutDataSourceWithBuffer
-        # and uncomment to recycle aborted groups under fresh weights.
-        # try:
-        #     data_source.add_samples([result])
-        # except Exception as e:
-        #     logger.warning(f"Failed to recycle aborted group: {e}")
+        # Re-queuing is not wired up (the per-adapter source is read-only).
         return None
     return result
 
@@ -179,15 +158,7 @@ async def generate_rollout_multi_lora_async(
 
     worker = AsyncMultiLoRAWorker.get_or_create(args, data_source, generate_fn)
 
-    # Staleness filter, mirroring fully_async_rollout: each group is stamped with
-    # the slot version live at submission (process_group), and a group whose
-    # version falls too far behind the controller's current version is dropped
-    # (reset_for_retry). Re-queuing via add_samples is NOT wired up yet — the
-    # per-adapter source is a read-only RolloutDataSource whose add_samples
-    # raises, so for now stale groups are discarded rather than regenerated under
-    # fresh weights. Groups for deregistered adapters are dropped too. The
-    # current version is read through a short-TTL cache so a long collection doesn't
-    # compare against a stale snapshot.
+    # Groups whose submission-time slot version fell too far behind are dropped.
     max_staleness = getattr(args, "max_weight_staleness", None)
 
     data: list[Group] = []
@@ -195,12 +166,11 @@ async def generate_rollout_multi_lora_async(
     staleness_values: list[int] = []
     start_time = time.time()
     last_progress = start_time
-    queue_length = worker.queue_size()  # completed groups waiting as batch filling begins
+    queue_length = worker.queue_size()
     while len(data) < target_data_size:
         made_progress = False
         current_adapters = await AdaptersCache().get_all()
-        # Pop one group at a time so the queue keeps anything beyond what this
-        # batch needs; a bulk snapshot would discard the surplus.
+        # Pop one at a time so surplus groups stay queued for the next batch.
         while len(data) < target_data_size:
             try:
                 group = worker.output_queue.get_nowait()
@@ -209,27 +179,14 @@ async def generate_rollout_multi_lora_async(
             head = first_sample(group) if group else None
             adapter_name = head.adapter.name if head is not None and head.adapter else None
             if adapter_name not in current_adapters:
-                # Adapter deregistered; its per-adapter source is gone, so the
-                # group cannot be recycled. Discard.
-                continue
+                continue  # adapter deregistered; drop
             if max_staleness is not None:
                 stamped = head.metadata.get("slot_version")
                 if stamped is not None:
                     staleness = current_adapters[adapter_name].version - stamped
                     if staleness > max_staleness:
-                        # Stale group. Re-queuing disabled for now: the
-                        # per-adapter source is a read-only RolloutDataSource
-                        # whose add_samples raises RuntimeError, so the group is
-                        # dropped. To regenerate under fresh weights, switch the
-                        # source to RolloutDataSourceWithBuffer and uncomment the
-                        # add_samples below (guard for cross-thread access — the
-                        # worker pulls get_samples on its own thread).
                         for s in iter_group_samples(group):
                             s.reset_for_retry()
-                        # try:
-                        #     data_source.add_samples([group])
-                        # except Exception as e:
-                        #     logger.warning(f"Failed to recycle stale group: {e}")
                         stale_dropped += 1
                         staleness_values.append(staleness)
                         logger.info(

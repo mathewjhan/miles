@@ -237,8 +237,7 @@ class MegatronTrainRayActor(TrainRayActor):
             is_lora=is_lora_enabled(args),
         )
 
-        # Multi-LoRA: adapters currently loaded into Megatron slots on this rank,
-        # tracked so update_weights can reconcile (load new / cleanup gone).
+        # Adapters currently loaded into Megatron slots on this rank.
         self.loaded_adapters: dict[str, object] = {}
 
         # empty cache after initialization
@@ -532,12 +531,8 @@ class MegatronTrainRayActor(TrainRayActor):
     @with_logs
     @timer
     def reconcile_adapters(self) -> None:
-        """Reconcile loaded adapters with the controller: load anything the
-        controller wants served (active + pending), clean up deregistered ones
-        (save final ckpt + clear Megatron slot + free), and free deregistered
-        adapters that were never loaded. The snapshot is read once on the main
-        rank and broadcast, so every rank reconciles the same set. No-op when
-        multi-LoRA is disabled."""
+        """Load what the controller wants served, tear down what it retired.
+        The snapshot is read once on the main rank and broadcast."""
         if not is_multi_lora_enabled(self.args):
             return
         from miles.backends.megatron_utils.multi_lora_utils import (
@@ -597,11 +592,8 @@ class MegatronTrainRayActor(TrainRayActor):
             from miles.backends.megatron_utils.multi_lora_utils import save_multi_lora_checkpoints
             from miles.ray.multi_lora_controller import get_multi_lora_controller
 
-            # Per-adapter cadence: called every iteration, saves only adapters
-            # whose step count reached a save-interval multiple and whose
-            # checkpoint for that step doesn't already exist on disk (the
-            # directory is the record of what has been saved). Rank 0 decides
-            # and broadcasts so the collective export lines up on all ranks.
+            # Rank 0 picks adapters at a save-interval multiple without a ckpt
+            # on disk, and broadcasts so the collective export lines up.
             due_buffer = [None]
             if is_first_replica_megatron_main_rank() and self.args.save_interval is not None:
                 snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
@@ -673,8 +665,6 @@ class MegatronTrainRayActor(TrainRayActor):
             return
 
         if is_multi_lora_enabled(self.args):
-            # The push set is the loaded map captured at reconcile, not a fresh
-            # controller query: push must cover exactly what is in the slots.
             self.weight_updater.multi_lora_adapters = dict(self.loaded_adapters)
 
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():

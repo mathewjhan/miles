@@ -1,9 +1,4 @@
-"""Multi-LoRA Ray actor + named-actor lookup.
-
-The adapter registry + HTTP server live in ``miles.utils.multi_lora`` (no Ray). This
-module wraps them in a named Ray actor (so library code reaches it via
-``get_multi_lora_controller()``) and runs the HTTP server out-of-band.
-"""
+"""Named Ray actor wrapping the multi-LoRA backend + HTTP server."""
 
 import time
 from functools import cache
@@ -26,10 +21,8 @@ def get_multi_lora_controller():
 
 
 class AdaptersCache(metaclass=SingletonMeta):
-    """TTL-cached controller snapshot (adapters partitioned by phase).
-
-    ``get``/``get_all`` expose the sampleable projection (active ∪ retiring),
-    which is what generation-side consumers filter and stamp against."""
+    """TTL-cached controller snapshot; get/get_all expose the sampleable
+    projection (active + retiring)."""
 
     def __init__(self, ttl_s: float = 1.0) -> None:
         self.ttl_s = ttl_s
@@ -113,8 +106,6 @@ class MultiLoRAController:
         return self.backend.registry.snapshot()
 
     def http_host(self) -> str:
-        """Routable address of the controller's node (the head node), not the
-        0.0.0.0 bind host."""
         return get_current_node_ip()
 
     def api_port(self) -> int:
@@ -122,8 +113,7 @@ class MultiLoRAController:
 
 
 def create_controller(args, router_url: str, host: str = "0.0.0.0"):
-    # Pinned to the head node so the API listener sits at a known address
-    # (head_ip:--multi-lora-api-port), reachable via port-forward to the head pod.
+    # Pinned to the head node so the API sits at a port-forwardable address.
     return MultiLoRAController.options(
         name=CONTROLLER_NAME,
         namespace=CONTROLLER_NAMESPACE,
