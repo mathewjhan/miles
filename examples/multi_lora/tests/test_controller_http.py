@@ -15,6 +15,10 @@ from miles.utils.adapter_config import AdapterConfig
 from miles.utils.multi_lora import RID_SEPARATOR, MultiLoRABackend, MultiLoRAHTTPServer
 
 
+def minimal_config(name: str) -> dict:
+    return {"data": f"/data/{name}.parquet", "save": f"/tmp/adapters/{name}"}
+
+
 class ControllerHarness:
     """Running control plane (backend + API listener) against a mock router
     that serves /list_workers and records /abort_request posts."""
@@ -38,14 +42,26 @@ class ControllerHarness:
             headers = {k.lower(): v for k, v in resp.headers.items()}
             return resp.status, await resp.json(), headers
 
+    async def api_delete(self, path: str) -> tuple[int, dict]:
+        async with self.session.delete(f"{self.api_base}{path}") as resp:
+            return resp.status, await resp.json()
+
     async def register(self, name: str) -> tuple[int, dict]:
-        status, body = await self.api_post("/register_adapter", {"name": name})
+        status, body = await self.api_post("/adapters", {"name": name, "config": minimal_config(name)})
         # Registered adapters start pending; a weight push promotes them.
         self.backend.registry.record_weight_update([name])
         return status, body
 
     async def deregister(self, name: str) -> tuple[int, dict]:
-        return await self.api_post("/deregister_adapter", {"name": name})
+        return await self.api_delete(f"/adapters/{name}")
+
+    async def active(self) -> dict:
+        _, body, _ = await self.api_get("/adapters")
+        return {
+            s["name"]: {"slot": s["slot"], "version": s["version"], "step": s["step"]}
+            for s in body["adapters"]
+            if s["state"] == "ACTIVE"
+        }
 
 
 @asynccontextmanager
@@ -89,8 +105,7 @@ async def test_register_and_active_view():
         status, body = await ctl.register("A")
         assert status == 200
         assert body["slot"] == 0
-        _, active, _ = await ctl.api_get("/active_adapters")
-        assert active == {"A": {"slot": 0, "version": 1, "step": 0}}
+        assert await ctl.active() == {"A": {"slot": 0, "version": 1, "step": 0}}
 
 
 @pytest.mark.asyncio
@@ -113,8 +128,7 @@ async def test_deregister_marks_and_retire_adapters_aborts():
 @pytest.mark.asyncio
 async def test_register_json_config_validates_to_adapter_config():
     """FastAPI validates the JSON body straight into AdapterConfig (422 on bad
-    payloads); /active_adapters exposes slot, version and step for external
-    orchestration."""
+    payloads)."""
     async with running_controller() as ctl:
         config = {
             "rank": 8,
@@ -122,7 +136,7 @@ async def test_register_json_config_validates_to_adapter_config():
             "save": "/tmp/adapters/A",
             "rm_type": "math",
         }
-        status, _ = await ctl.api_post("/register_adapter", {"name": "A", "config": config})
+        status, _ = await ctl.api_post("/adapters", {"name": "A", "config": config})
         assert status == 200
         record = ctl.backend.registry.find("A")
         assert isinstance(record.config, AdapterConfig)
@@ -130,12 +144,51 @@ async def test_register_json_config_validates_to_adapter_config():
         assert Path(record.config.save) == Path("/tmp/adapters/A")
         assert record.config.input_key == "text"  # dataclass default
 
-        status, _ = await ctl.api_post("/register_adapter", {"name": "B", "config": {"rank": 8}})
+        status, _ = await ctl.api_post("/adapters", {"name": "B", "config": {"rank": 8}})
         assert status == 422  # data is required
 
+        status, _ = await ctl.api_post("/adapters", {"name": "C"})
+        assert status == 400  # exactly one of config/yaml_path
+
+
+@pytest.mark.asyncio
+async def test_state_endpoint_reports_lifecycle_and_completed():
+    """States walk PENDING -> ACTIVE -> RETIRING -> CLEANUP -> COMPLETED;
+    unknown names report null. COMPLETED is retained after free_slot, so
+    watchers can tell completion apart from a controller that lost the
+    record."""
+    async with running_controller() as ctl:
+        await ctl.api_post("/adapters", {"name": "A", "config": minimal_config("A")})
+
+        async def state_of(name):
+            _, body, _ = await ctl.api_get(f"/adapters/state?names={name}")
+            return body["states"][name]
+
+        assert await state_of("A") == "PENDING"
         ctl.backend.registry.record_weight_update(["A"])
-        _, body, _ = await ctl.api_get("/active_adapters")
-        assert body == {"A": {"slot": 0, "version": 1, "step": 0}}
+        assert await state_of("A") == "ACTIVE"
+
+        await ctl.deregister("A")
+        assert await state_of("A") == "RETIRING"
+        await ctl.backend.retire_adapters()
+        assert await state_of("A") == "CLEANUP"
+
+        ctl.backend.registry.free_slot("A")
+        assert await state_of("A") == "COMPLETED"
+        assert await state_of("nope") is None
+
+        # GET by name serves the completed record; DELETE of unknown 404s.
+        status, body, _ = await ctl.api_get("/adapters/A")
+        assert status == 200 and body["state"] == "COMPLETED"
+        status, _ = await ctl.api_delete("/adapters/nope")
+        assert status == 404
+
+        # Re-registration reclaims the name; the completed record is dropped.
+        status, _ = await ctl.api_post(
+            "/adapters", {"name": "A", "config": {"data": "/data/A2.parquet", "save": "/tmp/adapters/A2"}}
+        )
+        assert status == 200
+        assert await state_of("A") == "PENDING"
 
 
 @pytest.mark.asyncio
@@ -157,9 +210,9 @@ async def test_custom_server_subclass_adds_routes():
             app.get("/custom_status")(self.custom_status)
 
         async def custom_status(self):
-            return {"custom": True, "active": self.active_slots()}
+            return {"custom": True, "active": sorted(self.backend.registry.active_adapters())}
 
     async with running_controller(server_cls=CustomServer) as ctl:
         _, body, headers = await ctl.api_get("/custom_status")
         assert headers.get("x-custom-server") == "1"
-        assert body == {"custom": True, "active": {}}
+        assert body == {"custom": True, "active": []}

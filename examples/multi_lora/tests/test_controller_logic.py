@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from miles.utils.adapter_config import AdapterConfig
-from miles.utils.multi_lora import AdapterRegistry, MultiLoRABackend, make_rid, parse_adapter
+from miles.utils.multi_lora import AdapterRegistry, AdapterState, MultiLoRABackend, make_rid, parse_adapter
 
 
 def make_args(max_adapters: int = 4, save: str | None = None) -> SimpleNamespace:
@@ -97,12 +97,12 @@ def test_deregister_retires_but_keeps_serving_until_demoted():
     registry = AdapterRegistry(max_adapters=4)
     register_and_promote(registry, "A")
     registry.deregister("A")
-    assert "A" in registry.retiring
+    assert registry.adapter_state("A") == AdapterState.RETIRING
     assert "A" in registry.active_adapters()  # still sampleable this iteration
     assert "A" in registry.snapshot()["retiring"]
     assert registry.retire_adapters() == ["A"]
     assert registry.active_adapters() == {}
-    assert "A" in registry.cleanup
+    assert registry.adapter_state("A") == AdapterState.CLEANUP
     assert registry.retire_adapters() == []  # idempotent
 
 
@@ -191,7 +191,7 @@ def test_register_rejects_duplicate_save_dir(tmp_path):
 async def test_save_dir_defaults_under_save_root(tmp_path):
     backend = make_backend(save=str(tmp_path))
     await backend.register("A", make_config())
-    saved = backend.registry.pending["A"].config.save
+    saved = backend.registry.records["A"].config.save
     assert saved == tmp_path / "adapters" / "A"
 
 
@@ -199,7 +199,7 @@ async def test_save_dir_defaults_under_save_root(tmp_path):
 async def test_explicit_save_dir_wins_over_root(tmp_path):
     backend = make_backend(save=str(tmp_path))
     await backend.register("A", make_config(save=tmp_path / "custom"))
-    assert backend.registry.pending["A"].config.save == tmp_path / "custom"
+    assert backend.registry.records["A"].config.save == tmp_path / "custom"
 
 
 @pytest.mark.asyncio
