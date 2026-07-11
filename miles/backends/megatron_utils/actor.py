@@ -602,8 +602,6 @@ class MegatronTrainRayActor(TrainRayActor):
             # checkpoint for that step doesn't already exist on disk (the
             # directory is the record of what has been saved). Rank 0 decides
             # and broadcasts so the collective export lines up on all ranks.
-            # save_interval unset means no periodic cadence; adapters still get
-            # final checkpoints on deregistration.
             due_buffer = [None]
             if is_first_replica_megatron_main_rank() and self.args.save_interval is not None:
                 snapshot = ray.get(get_multi_lora_controller().snapshot.remote())

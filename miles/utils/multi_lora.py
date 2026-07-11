@@ -32,6 +32,7 @@ __all__ = [
     "MultiLoRABackend",
     "MultiLoRAHTTPServer",
     "RID_SEPARATOR",
+    "is_multi_lora_enabled",
     "make_rid",
     "parse_adapter",
 ]
@@ -45,6 +46,10 @@ RID_SEPARATOR = "::"
 # Names become rid prefixes and filesystem path components (default save dirs),
 # so restrict them to a path- and separator-safe alphabet.
 VALID_ADAPTER_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def is_multi_lora_enabled(args: Any) -> bool:
+    return getattr(args, "multi_lora", False)
 
 
 def make_rid(adapter_name: str) -> str:
@@ -85,22 +90,14 @@ class AdapterRecord:
 # mark_batch_trained.
 MAX_BATCH_RECORDS = 16
 
-# Completed adapters retained for status queries (LRU: reads refresh recency,
-# so records being polled are not evicted under churn).
+# LRU-retained COMPLETED records (reads refresh recency).
 MAX_COMPLETED_RECORDS = 1024
 
 
 class AdapterRegistry:
-    """Adapter lifecycle: one record per name, each carrying its
-    ``AdapterState``; every per-state view is derived by filtering.
-    Transitions are single state assignments, so a record is in exactly one
-    state by construction. Promotion (PENDING -> ACTIVE) happens in
-    ``record_weight_update``, i.e. exactly when a weight push made it true.
-
-    ``slot_versions`` count pushes to the slot and never reset, even across slot
-    reuse (a new tenant continues where the previous one left off), so a
-    (slot, version) pair never recurs: staleness deltas count this adapter's own
-    pushes, and radix-cache salts can never collide with an earlier tenant's."""
+    """One record per name, each carrying its ``AdapterState``; views are
+    filters and transitions are single state assignments. ``slot_versions``
+    count pushes per slot and never reset, so (slot, version) never recurs."""
 
     def __init__(self, max_adapters: int) -> None:
         self.max_adapters = max_adapters
@@ -163,8 +160,7 @@ class AdapterRegistry:
             return -1
         self.free_slots.add(record.slot)
         record.state = AdapterState.COMPLETED
-        # Reinsert so COMPLETED records order oldest-first for LRU eviction.
-        self.records[name] = self.records.pop(name)
+        self.records[name] = self.records.pop(name)  # LRU: reinsert at the end
         completed = self.in_state(AdapterState.COMPLETED)
         for oldest in list(completed)[: len(completed) - MAX_COMPLETED_RECORDS]:
             self.records.pop(oldest)
@@ -175,8 +171,7 @@ class AdapterRegistry:
         if record is None:
             return None
         if record.state is AdapterState.COMPLETED:
-            # LRU touch: keep records that are still being polled.
-            self.records[name] = self.records.pop(name)
+            self.records[name] = self.records.pop(name)  # LRU touch
         return record.state
 
     def record_weight_update(self, names: list[str]) -> None:
@@ -409,8 +404,7 @@ class MultiLoRAHTTPServer:
         return {"status": "healthy"}
 
     def adapter_statuses(self) -> list[dict]:
-        """Flatten each RegisteredAdapter view plus its lifecycle state into
-        the wire shape (config fields at the top level)."""
+        """RegisteredAdapter views flattened into the wire shape."""
         registry = self.backend.registry
         statuses = []
         for record in registry.records.values():
@@ -419,9 +413,7 @@ class MultiLoRAHTTPServer:
             flat["save"] = str(flat["save"])
             flat["state"] = record.state
             if record.state is AdapterState.COMPLETED:
-                # The slot may already host another tenant; its counter is
-                # not this adapter's version.
-                flat["version"] = None
+                flat["version"] = None  # freed slot; counter may be another tenant's
             statuses.append(flat)
         return statuses
 

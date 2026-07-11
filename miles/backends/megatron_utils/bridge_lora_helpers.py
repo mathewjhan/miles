@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from megatron.core.utils import get_attr_wrapped_model
 
 from miles.utils.hf_config import load_hf_config
+from miles.utils.multi_lora import is_multi_lora_enabled
 
 from .lora_utils import create_lora_instance, patch_param_grad_buffer_for_colocate_mode_lora
 
@@ -111,7 +112,7 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
         provider.dsa_attention_backend = getattr(args, "dsa_attention_backend", "megatron")
     provider.finalize()
 
-    if getattr(args, "multi_lora", False):
+    if is_multi_lora_enabled(args):
         from miles.backends.megatron_utils.multi_lora_utils import create_multi_lora_instance
 
         lora = create_multi_lora_instance(args)

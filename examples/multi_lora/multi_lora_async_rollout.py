@@ -33,9 +33,8 @@ logger = logging.getLogger(__name__)
 
 GenerateFn = Callable[..., Any]
 
-# Group members are Sample or list[Sample]: custom generate fns may return
-# several samples per rollout. The nesting is kept intact through this file
-# (mirroring sglang_rollout) and flattened later by the rollout manager.
+# Custom generate fns may return several samples per rollout; the nesting is
+# kept intact here and flattened later by the rollout manager.
 Group = list[Sample | list[Sample]]
 
 

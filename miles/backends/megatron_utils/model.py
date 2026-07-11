@@ -34,6 +34,7 @@ from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from miles.utils.memory_utils import clear_memory
 from miles.utils.test_utils.ft_test_actions import FTTestActionActorExecutor
 from miles.utils.tracking_utils.structured_log import log_structured
+from miles.utils.multi_lora import is_multi_lora_enabled
 
 from ...utils.misc import filter_keys
 from ..training_utils.ci_utils import check_grad_norm, check_kl
@@ -140,7 +141,7 @@ def setup_model_and_optimizer(
 
     # Multi-LoRA and single-LoRA (actor, bridge) both build via the bridge helper,
     # which picks the adapter type internally.
-    if getattr(args, "multi_lora", False) or (
+    if is_multi_lora_enabled(args) or (
         is_lora_enabled(args) and role == "actor" and args.megatron_to_hf_mode == "bridge"
     ):
         model = _setup_lora_model_via_bridge(args)
@@ -927,7 +928,7 @@ def initialize_model_and_optimizer(
     model[0].role = role
     clear_memory()
 
-    multi_lora = getattr(args, "multi_lora", False)
+    multi_lora = is_multi_lora_enabled(args)
     if multi_lora:
         # Hide adapter params so the bridge's conversion-task walk doesn't see them
         # while loading the base checkpoint.

@@ -154,9 +154,7 @@ async def test_register_json_config_validates_to_adapter_config():
 @pytest.mark.asyncio
 async def test_state_endpoint_reports_lifecycle_and_completed():
     """States walk PENDING -> ACTIVE -> RETIRING -> CLEANUP -> COMPLETED;
-    unknown names report null. COMPLETED is retained after free_slot, so
-    watchers can tell completion apart from a controller that lost the
-    record."""
+    unknown names report null; COMPLETED is retained after free_slot."""
     async with running_controller() as ctl:
         await ctl.api_post("/adapters", {"name": "A", "config": minimal_config("A")})
 
