@@ -345,11 +345,11 @@ class MultiLoRAHTTPServer:
 
     def add_routes(self, app: FastAPI) -> None:
         app.get("/health")(self.health)
-        app.get("/adapters")(self.list_adapters)
-        app.get("/adapters/state")(self.adapter_states)  # before /adapters/{name}
-        app.get("/adapters/{name}")(self.get_adapter)
-        app.post("/adapters")(self.register_adapter)
-        app.delete("/adapters/{name}")(self.deregister_adapter)
+        app.get("/adapter_runs")(self.list_adapters)
+        app.get("/adapter_runs/state")(self.adapter_states)  # before /adapter_runs/{name}
+        app.get("/adapter_runs/{name}")(self.get_adapter)
+        app.post("/adapter_runs")(self.register_adapter)
+        app.delete("/adapter_runs/{name}")(self.deregister_adapter)
 
     async def start(self) -> None:
         app = self.create_app()

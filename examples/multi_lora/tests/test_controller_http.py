@@ -47,16 +47,16 @@ class ControllerHarness:
             return resp.status, await resp.json()
 
     async def register(self, name: str) -> tuple[int, dict]:
-        status, body = await self.api_post("/adapters", {"name": name, "config": minimal_config(name)})
+        status, body = await self.api_post("/adapter_runs", {"name": name, "config": minimal_config(name)})
         # Registered adapters start pending; a weight push promotes them.
         self.backend.registry.record_weight_update([name])
         return status, body
 
     async def deregister(self, name: str) -> tuple[int, dict]:
-        return await self.api_delete(f"/adapters/{name}")
+        return await self.api_delete(f"/adapter_runs/{name}")
 
     async def active(self) -> dict:
-        _, body, _ = await self.api_get("/adapters")
+        _, body, _ = await self.api_get("/adapter_runs")
         return {
             s["name"]: {"slot": s["slot"], "version": s["version"], "step": s["step"]}
             for s in body["adapters"]
@@ -136,7 +136,7 @@ async def test_register_json_config_validates_to_adapter_config():
             "save": "/tmp/adapters/A",
             "rm_type": "math",
         }
-        status, _ = await ctl.api_post("/adapters", {"name": "A", "config": config})
+        status, _ = await ctl.api_post("/adapter_runs", {"name": "A", "config": config})
         assert status == 200
         record = ctl.backend.registry.find("A")
         assert isinstance(record.config, AdapterRunConfig)
@@ -144,10 +144,10 @@ async def test_register_json_config_validates_to_adapter_config():
         assert Path(record.config.save) == Path("/tmp/adapters/A")
         assert record.config.input_key == "text"  # dataclass default
 
-        status, _ = await ctl.api_post("/adapters", {"name": "B", "config": {"rank": 8}})
+        status, _ = await ctl.api_post("/adapter_runs", {"name": "B", "config": {"rank": 8}})
         assert status == 422  # data is required
 
-        status, _ = await ctl.api_post("/adapters", {"name": "C"})
+        status, _ = await ctl.api_post("/adapter_runs", {"name": "C"})
         assert status == 400  # exactly one of config/yaml_path
 
 
@@ -156,10 +156,10 @@ async def test_state_endpoint_reports_lifecycle_and_completed():
     """States walk PENDING -> ACTIVE -> RETIRING -> CLEANUP -> COMPLETED;
     unknown names report null; COMPLETED is retained after free_slot."""
     async with running_controller() as ctl:
-        await ctl.api_post("/adapters", {"name": "A", "config": minimal_config("A")})
+        await ctl.api_post("/adapter_runs", {"name": "A", "config": minimal_config("A")})
 
         async def state_of(name):
-            _, body, _ = await ctl.api_get(f"/adapters/state?names={name}")
+            _, body, _ = await ctl.api_get(f"/adapter_runs/state?names={name}")
             return body["states"][name]
 
         assert await state_of("A") == "PENDING"
@@ -176,14 +176,14 @@ async def test_state_endpoint_reports_lifecycle_and_completed():
         assert await state_of("nope") is None
 
         # GET by name serves the completed record; DELETE of unknown 404s.
-        status, body, _ = await ctl.api_get("/adapters/A")
+        status, body, _ = await ctl.api_get("/adapter_runs/A")
         assert status == 200 and body["state"] == "COMPLETED"
-        status, _ = await ctl.api_delete("/adapters/nope")
+        status, _ = await ctl.api_delete("/adapter_runs/nope")
         assert status == 404
 
         # Re-registration reclaims the name; the completed record is dropped.
         status, _ = await ctl.api_post(
-            "/adapters", {"name": "A", "config": {"data": "/data/A2.parquet", "save": "/tmp/adapters/A2"}}
+            "/adapter_runs", {"name": "A", "config": {"data": "/data/A2.parquet", "save": "/tmp/adapters/A2"}}
         )
         assert status == 200
         assert await state_of("A") == "PENDING"

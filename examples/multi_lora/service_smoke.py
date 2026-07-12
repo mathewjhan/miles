@@ -25,7 +25,7 @@ class ServiceClient:
         self.http = httpx.Client(timeout=30.0)
 
     def active_adapters(self) -> dict:
-        response = self.http.get(f"{self.api_url}/adapters")
+        response = self.http.get(f"{self.api_url}/adapter_runs")
         response.raise_for_status()
         return {
             status["name"]: {"slot": status["slot"], "version": status["version"], "step": status["step"]}
@@ -34,10 +34,10 @@ class ServiceClient:
         }
 
     def register(self, name: str, config: dict) -> httpx.Response:
-        return self.http.post(f"{self.api_url}/adapters", json={"name": name, "config": config})
+        return self.http.post(f"{self.api_url}/adapter_runs", json={"name": name, "config": config})
 
     def deregister(self, name: str) -> None:
-        response = self.http.delete(f"{self.api_url}/adapters/{name}")
+        response = self.http.delete(f"{self.api_url}/adapter_runs/{name}")
         response.raise_for_status()
 
     def wait_for(self, description: str, predicate) -> dict:

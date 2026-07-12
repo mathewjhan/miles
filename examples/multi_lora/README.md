@@ -32,7 +32,7 @@ Ray actor, pinned to the head node).
 ## Design (no drain, no state machine)
 
 - **Controller** (Ray actor + control-plane HTTP API) is the source of truth:
-  `POST/GET/DELETE /adapters` plus `GET /adapters/state`. The data source
+  `POST/GET/DELETE /adapter_runs` plus `GET /adapter_runs/state`. The data source
   reads it; the trainer reads it. Generation traffic goes straight to the router;
   on deregister the controller aborts the adapter's in-flight requests
   engine-side by rid prefix (`rid = {adapter}::{uuid}`, set in `generate`).
