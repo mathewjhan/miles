@@ -51,7 +51,6 @@ class UpdateWeightFromTensor:
         """
         Compute param buckets, create IPC Gloo groups (rollout_num_gpus_per_engine ranks/group).
         """
-
         self.args = args
         self.model = model
         self.weights_getter = weights_getter
@@ -59,8 +58,6 @@ class UpdateWeightFromTensor:
         self.quantization_config = quantization_config
         self.weight_version = 0
         self.is_lora = is_lora
-        self._lora_loaded = False
-        self._lora_name = LORA_ADAPTER_NAME
 
         self._hf_weight_iterator = HfWeightIteratorBase.create(
             args=args,
