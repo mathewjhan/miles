@@ -533,12 +533,11 @@ async def generate_rollout_multi_lora_async(
         **worker.metrics.pop_metrics(),
         "perf/fully_async/queue_length": sum(queue_sizes.values()),
         "perf/fully_async/stale_dropped": len(all_staleness),
-        # Adapter-prefixed keys land in the adapter's dashboard section; the
-        # exact-name define pins them to this call's rollout/step axis (unlike
-        # the {name}/step-axis metrics, which ship in their own step-keyed
-        # calls above).
-        **{f"{name}/perf/queue_length": size for name, size in queue_sizes.items()},
-        **{f"{name}/perf/stale_dropped": len(stale_drops.get(name, [])) for name in adapters},
+        # Per-adapter cycle metrics live in their own {name}_perf namespace:
+        # a namespace maps to exactly one x-axis, and these ride rollout/step
+        # while the {name}/ namespace is on the adapter's step axis.
+        **{f"{name}_perf/queue_length": size for name, size in queue_sizes.items()},
+        **{f"{name}_perf/stale_dropped": len(stale_drops.get(name, [])) for name in adapters},
         "perf/fully_async/batch_wait_time": time.time() - start_time,
         "perf/fully_async/batch_n_adapters": len(batch.group_counts),
         "perf/fully_async/batch_n_groups": len(data),
@@ -550,8 +549,8 @@ async def generate_rollout_multi_lora_async(
         metrics["perf/fully_async/stale_dropped_max_staleness"] = max(all_staleness)
     for name, values in stale_drops.items():
         if values:
-            metrics[f"{name}/perf/stale_dropped_avg_staleness"] = sum(values) / len(values)
-            metrics[f"{name}/perf/stale_dropped_max_staleness"] = max(values)
+            metrics[f"{name}_perf/stale_dropped_avg_staleness"] = sum(values) / len(values)
+            metrics[f"{name}_perf/stale_dropped_max_staleness"] = max(values)
 
     return RolloutFnTrainOutput(samples=data, metrics=metrics)
 
