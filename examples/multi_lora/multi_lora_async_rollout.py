@@ -236,17 +236,23 @@ class MultiLoRAWorkerMetrics:
                         f"Adapter '{name}' stepped with {len(rewards)} shipped samples, expected "
                         f"adapter_global_batch_size={expected}; batch accounting drifted"
                     )
+                # Keys are single-segment ("raw_reward_mean", not
+                # "rollout/raw_reward/mean") so that, prefixed with
+                # "{name}/", they sit one level under the "{name}/*" glob —
+                # the same shape as "train/loss" under "train/*". Deeper keys
+                # never get their axis: glob expansion only matches one
+                # segment on the server.
                 flushed[name] = {
-                    **dict_add_prefix(compute_statistics(rewards), "rollout/raw_reward/"),
-                    **dict_add_prefix(compute_statistics(response_lens), "rollout/response_len/"),
+                    **dict_add_prefix(compute_statistics(rewards), "raw_reward_"),
+                    **dict_add_prefix(compute_statistics(response_lens), "response_len_"),
                 }
                 if log_prob_means:
-                    flushed[name]["rollout/log_probs"] = sum(log_prob_means) / len(log_prob_means)
+                    flushed[name]["log_probs"] = sum(log_prob_means) / len(log_prob_means)
                 if total_groups:
                     zero = sum(1 for reward in zero_std_rewards if reward == 0.0)
                     one = sum(1 for reward in zero_std_rewards if reward == 1.0)
-                    flushed[name]["rollout/zero_std/all_zero_percentage"] = zero / total_groups
-                    flushed[name]["rollout/zero_std/all_one_percentage"] = one / total_groups
+                    flushed[name]["zero_std_all_zero_percentage"] = zero / total_groups
+                    flushed[name]["zero_std_all_one_percentage"] = one / total_groups
             return flushed
 
     def discard_adapter(self, name: str) -> None:
