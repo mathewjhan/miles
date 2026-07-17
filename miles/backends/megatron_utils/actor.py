@@ -22,7 +22,7 @@ from miles.utils.distributed_utils import get_gloo_group, init_process_group
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
 from miles.utils.hf_config import load_hf_config
 from miles.utils.memory_utils import clear_memory, print_memory
-from miles.utils.multi_lora import define_new_adapter_metrics, is_multi_lora_enabled
+from miles.utils.multi_lora import is_multi_lora_enabled
 from miles.utils.processing_utils import load_tokenizer
 from miles.utils.ray_utils import Box
 from miles.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
@@ -563,10 +563,6 @@ class MegatronTrainRayActor(TrainRayActor):
         if dist.is_initialized():
             dist.broadcast_object_list(broadcast_buffer, src=0, group=get_gloo_group())
         snapshot = broadcast_buffer[0]
-        # Rank 0 is one of the run's wandb writers; every writer must carry
-        # the adapter metric definitions locally, or its next config upload
-        # wipes them from the run. No-op on ranks without tracking backends.
-        define_new_adapter_metrics(snapshot)
         should_be_loaded = {**snapshot["active"], **snapshot["pending"], **snapshot["retiring"]}
         cleanup_names = set(snapshot["cleanup"])
 
