@@ -6,6 +6,7 @@ HTTP-agnostic: the FastAPI adapter (``sessions.py`` + ``server.py``) turns each 
 - ``chat_completions`` holds the per-session lock for prep and state update but not across the proxy call; ``closing`` re-checks and the ``num_assistant`` check gate concurrent DELETE/chat.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -236,6 +237,13 @@ class SessionCore:
 
         completion_token_ids = [t[1] for t in output_token_logprobs]
 
+        stored_assistant_message = {
+            "role": "assistant",
+            "content": choice["message"]["content"],
+            "tool_calls": None,
+            "reasoning_content": None,
+        }
+
         # --- Phase 3: update state (lock held briefly) ---
         async with session.lock:
             if session.closing:
@@ -252,7 +260,7 @@ class SessionCore:
 
             session.update_pretokenized_state(
                 request_messages,
-                assistant_message,
+                stored_assistant_message,
                 prompt_token_ids=prompt_token_ids,
                 completion_token_ids=completion_token_ids,
                 max_trim_tokens=self.registry.tito_tokenizer.max_trim_tokens,
