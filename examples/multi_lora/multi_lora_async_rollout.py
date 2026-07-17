@@ -168,6 +168,12 @@ class MultiLoRAWorkerMetrics:
         # adapter_global_batch_size values per adapter.
         self.step_rewards: dict[str, list[float]] = defaultdict(list)
         self.step_response_lens: dict[str, list[float]] = defaultdict(list)
+        # Per-sample mean engine log prob (rough per-adapter entropy trend).
+        self.step_log_prob_means: dict[str, list[float]] = defaultdict(list)
+        # Group outcomes for zero-std rates: total groups shipped, and the
+        # common reward of each uniform-reward (zero advantage) group.
+        self.step_group_counts: dict[str, int] = defaultdict(int)
+        self.step_zero_std_rewards: dict[str, list[float]] = defaultdict(list)
 
     def record_dynamic_filter_drop(self, reason: str) -> None:
         with self.lock:
@@ -201,14 +207,27 @@ class MultiLoRAWorkerMetrics:
                 name = group_adapter_name(group)
                 if name is None:
                     continue
+                group_rewards = []
                 for sample in iter_group_samples(group):
-                    self.step_rewards[name].append(sample.get_reward_value(args))
+                    reward = sample.get_reward_value(args)
+                    group_rewards.append(reward)
+                    self.step_rewards[name].append(reward)
                     self.step_response_lens[name].append(sample.effective_response_length)
+                    if sample.rollout_log_probs:
+                        self.step_log_prob_means[name].append(
+                            sum(sample.rollout_log_probs) / len(sample.rollout_log_probs)
+                        )
+                self.step_group_counts[name] += 1
+                if len(group_rewards) > 1 and all(reward == group_rewards[0] for reward in group_rewards):
+                    self.step_zero_std_rewards[name].append(round(group_rewards[0], 1))
 
             flushed: dict[str, dict[str, float]] = {}
             for name in step_names:
                 rewards = self.step_rewards.pop(name, [])
                 response_lens = self.step_response_lens.pop(name, [])
+                log_prob_means = self.step_log_prob_means.pop(name, [])
+                total_groups = self.step_group_counts.pop(name, 0)
+                zero_std_rewards = self.step_zero_std_rewards.pop(name, [])
                 if not rewards:
                     continue
                 expected = adapters[name].config.adapter_global_batch_size
@@ -221,6 +240,13 @@ class MultiLoRAWorkerMetrics:
                     **dict_add_prefix(compute_statistics(rewards), "rollout/raw_reward/"),
                     **dict_add_prefix(compute_statistics(response_lens), "rollout/response_len/"),
                 }
+                if log_prob_means:
+                    flushed[name]["rollout/log_probs"] = sum(log_prob_means) / len(log_prob_means)
+                if total_groups:
+                    zero = sum(1 for reward in zero_std_rewards if reward == 0.0)
+                    one = sum(1 for reward in zero_std_rewards if reward == 1.0)
+                    flushed[name]["rollout/zero_std/all_zero_percentage"] = zero / total_groups
+                    flushed[name]["rollout/zero_std/all_one_percentage"] = one / total_groups
             return flushed
 
     def discard_adapter(self, name: str) -> None:
@@ -228,6 +254,9 @@ class MultiLoRAWorkerMetrics:
         with self.lock:
             self.step_rewards.pop(name, None)
             self.step_response_lens.pop(name, None)
+            self.step_log_prob_means.pop(name, None)
+            self.step_group_counts.pop(name, None)
+            self.step_zero_std_rewards.pop(name, None)
             self.staleness_values.pop(name, None)
 
     def pop_metrics(self) -> dict[str, float]:
