@@ -29,7 +29,7 @@ from miles.rollout.sglang_rollout import GenerateState, generate_and_rm_group, g
 from miles.utils.async_utils import run
 from miles.utils.metric_utils import compute_statistics, dict_add_prefix
 from miles.utils.misc import load_function
-from miles.utils.multi_lora import EmptyBatchTimeoutError, define_new_adapter_metrics, min_groups_per_dp_split
+from miles.utils.multi_lora import EmptyBatchTimeoutError, min_groups_per_dp_split
 from miles.utils.tracking_utils import tracking
 from miles.utils.types import Sample
 
@@ -517,7 +517,6 @@ async def generate_rollout_multi_lora_async(
     # between generate calls — so one snapshot serves the whole collection.
     snapshot = await get_multi_lora_controller().snapshot.remote()
     assert snapshot["active"] or snapshot["retiring"], "generate called with no live adapters"
-    define_new_adapter_metrics(snapshot)
 
     batch = await collect_batch(args, worker, snapshot)
 
