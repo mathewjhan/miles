@@ -27,6 +27,7 @@ from miles.rollout.filter_hub.base_types import call_dynamic_filter
 from miles.rollout.generate_utils.prefill_logprobs import recompute_samples_rollout_logprobs_via_prefill
 from miles.rollout.sglang_rollout import GenerateState, generate_and_rm_group, get_model_url
 from miles.utils.async_utils import run
+from miles.utils.metric_utils import compute_statistics, dict_add_prefix
 from miles.utils.misc import load_function
 from miles.utils.multi_lora import EmptyBatchTimeoutError, min_groups_per_dp_split
 from miles.utils.tracking_utils import tracking
@@ -162,11 +163,11 @@ class MultiLoRAWorkerMetrics:
         self.dynamic_filter_drop_counts: dict[str, int] = defaultdict(int)
         # Staleness of dropped groups per adapter, drained every batch.
         self.staleness_values: dict[str, list[int]] = defaultdict(list)
-        # Shipped-sample stats, accumulated per adapter across train batches
-        # and flushed as step means when the adapter steps.
-        self.step_reward_sums: dict[str, float] = defaultdict(float)
-        self.step_response_len_sums: dict[str, float] = defaultdict(float)
-        self.step_sample_counts: dict[str, int] = defaultdict(int)
+        # Shipped-sample values, accumulated per adapter across train batches
+        # and flushed as step statistics when the adapter steps. Bounded by
+        # adapter_global_batch_size values per adapter.
+        self.step_rewards: dict[str, list[float]] = defaultdict(list)
+        self.step_response_lens: dict[str, list[float]] = defaultdict(list)
 
     def record_dynamic_filter_drop(self, reason: str) -> None:
         with self.lock:
@@ -187,10 +188,10 @@ class MultiLoRAWorkerMetrics:
         self, args, data: list[Group], step_names: list[str], adapters: dict
     ) -> dict[str, dict[str, float]]:
         """Accumulate the shipped batch's rewards and response lengths per
-        adapter; for adapters stepping with this batch, flush means over their
-        whole adapter batch (accumulated across shipped batches, so each mean
-        covers all ``adapter_global_batch_size`` samples of the step, not just
-        this batch's slice). Returns {adapter name: flushed metrics}.
+        adapter; for adapters stepping with this batch, flush statistics over
+        their whole adapter batch (accumulated across shipped batches, so the
+        stats cover all ``adapter_global_batch_size`` samples of the step, not
+        just this batch's slice). Returns {adapter name: flushed metrics}.
 
         Counted at ship time, not train commit: a failed train call aborts the
         run anyway, so the distinction has no practical effect.
@@ -201,31 +202,32 @@ class MultiLoRAWorkerMetrics:
                 if name is None:
                     continue
                 for sample in iter_group_samples(group):
-                    self.step_reward_sums[name] += sample.get_reward_value(args)
-                    self.step_response_len_sums[name] += sample.effective_response_length
-                    self.step_sample_counts[name] += 1
+                    self.step_rewards[name].append(sample.get_reward_value(args))
+                    self.step_response_lens[name].append(sample.effective_response_length)
 
             flushed: dict[str, dict[str, float]] = {}
             for name in step_names:
-                if (count := self.step_sample_counts.pop(name, 0)) > 0:
-                    expected = adapters[name].config.adapter_global_batch_size
-                    if count != expected:
-                        logger.warning(
-                            f"Adapter '{name}' stepped with {count} shipped samples, expected "
-                            f"adapter_global_batch_size={expected}; batch accounting drifted"
-                        )
-                    flushed[name] = {
-                        "rollout/raw_reward/mean": self.step_reward_sums.pop(name) / count,
-                        "rollout/response_len/mean": self.step_response_len_sums.pop(name) / count,
-                    }
+                rewards = self.step_rewards.pop(name, [])
+                response_lens = self.step_response_lens.pop(name, [])
+                if not rewards:
+                    continue
+                expected = adapters[name].config.adapter_global_batch_size
+                if len(rewards) != expected:
+                    logger.warning(
+                        f"Adapter '{name}' stepped with {len(rewards)} shipped samples, expected "
+                        f"adapter_global_batch_size={expected}; batch accounting drifted"
+                    )
+                flushed[name] = {
+                    **dict_add_prefix(compute_statistics(rewards), "rollout/raw_reward/"),
+                    **dict_add_prefix(compute_statistics(response_lens), "rollout/response_len/"),
+                }
             return flushed
 
     def discard_adapter(self, name: str) -> None:
         """Drop a retired adapter's partial step accumulation."""
         with self.lock:
-            self.step_reward_sums.pop(name, None)
-            self.step_response_len_sums.pop(name, None)
-            self.step_sample_counts.pop(name, None)
+            self.step_rewards.pop(name, None)
+            self.step_response_lens.pop(name, None)
             self.staleness_values.pop(name, None)
 
     def pop_metrics(self) -> dict[str, float]:
