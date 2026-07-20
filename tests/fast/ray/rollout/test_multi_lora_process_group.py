@@ -2,10 +2,10 @@
 filter compares against the version live when the group was submitted, not
 when it completed."""
 
-import examples.multi_lora.multi_lora_async_rollout as mod
 import pytest
-from examples.multi_lora.multi_lora_async_rollout import process_group
 
+import miles.rollout.multi_lora.async_rollout as mod
+from miles.rollout.multi_lora.async_rollout import process_group
 from miles.utils.types import AdapterRef, Sample
 
 
@@ -18,8 +18,9 @@ class FakeDataSource:
 
 
 class FakeAdapterView:
-    def __init__(self, version: int) -> None:
+    def __init__(self, version: int, registration_id: str = "reg-1") -> None:
         self.version = version
+        self.registration_id = registration_id
 
 
 class FakeAdaptersCache:
@@ -52,3 +53,4 @@ async def test_process_group_stamps_submission_version(monkeypatch):
 
     assert result is g
     assert g[0].metadata["slot_version"] == 5
+    assert g[0].metadata["registration_id"] == "reg-1"

@@ -50,13 +50,14 @@ class DistBucketedWeightUpdateMixin:
         self._update_weight_implementation(converted_named_tensors, pbar) -> None
             Transfer a bucket of HF-format ``(name, tensor)`` pairs to rollout
             engines (via NCCL broadcast, p2p write, etc.).
-        self._update_lora_weight_implementation(named_tensors, *, lora_name, lora_config) -> None
-            Transfer one LoRA adapter (HF-format ``(name, tensor)`` pairs) to
+        self._update_lora_weight_implementation(named_tensors) -> None
+            Transfer the full LoRA adapter (HF-format ``(name, tensor)`` pairs) to
             rollout engines. Only required when ``is_lora``; the
-            unload-before-reload is handled by ``_update_lora_weights`` /
-            ``_send_one_multi_lora_adapter``. ``lora_name`` / ``lora_config``
-            default to the single-adapter values and are overridden per adapter
-            in the multi-LoRA path.
+            unload-before-reload is handled by ``_update_lora_weights``.
+        self._update_multi_lora_weight_implementation(named_tensors, *, lora_name, lora_config) -> None
+            Multi-LoRA variant: transfers one adapter under its per-slot engine
+            name with the adapter's own config, upserting in place. Only
+            required when multi-LoRA is enabled.
     """
 
     def _init_lora(
@@ -270,20 +271,19 @@ class DistBucketedWeightUpdateMixin:
         adapters = self.multi_lora_adapters
         assert adapters is not None, "actor must set multi_lora_adapters before update_weights"
         for name in sorted(adapters):
-            self._send_one_multi_lora_adapter(adapters[name], upsert=True)
+            self._send_one_multi_lora_adapter(adapters[name])
 
-    def _send_one_multi_lora_adapter(self, adapter, upsert: bool) -> None:
+    def _send_one_multi_lora_adapter(self, adapter) -> None:
         """All ranks iterate the bridge (TP collectives); only the source
         rank transmits."""
         from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
 
+        from miles.utils.multi_lora import slot_lora_name
+
         from ...multi_lora_utils import slice_lora_to_rank
 
-        config = adapter.config
-        adapter_rank = config.rank
-        lora_config = build_lora_sync_config(self.args)
-        lora_config["r"] = adapter_rank
-        lora_config["lora_alpha"] = config.alpha
+        adapter_rank = adapter.config.rank
+        lora_config = build_lora_sync_config(self.args) | {"r": adapter_rank, "lora_alpha": adapter.config.alpha}
 
         accumulated_named_tensors: list[tuple[str, torch.Tensor]] = []
         with expose_adapter_slot(self.model, adapter.slot):
@@ -302,13 +302,10 @@ class DistBucketedWeightUpdateMixin:
                 "Megatron-Bridge or SGLang version is incompatible."
             )
 
-        from miles.utils.multi_lora import slot_lora_name
-
-        self._update_lora_weight_implementation(
+        self._update_multi_lora_weight_implementation(
             accumulated_named_tensors,
             lora_name=slot_lora_name(adapter.slot),
             lora_config=lora_config,
-            upsert=upsert,
         )
 
     def _pause_and_prepare_engines(self) -> None:

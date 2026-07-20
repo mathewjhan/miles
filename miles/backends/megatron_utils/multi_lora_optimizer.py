@@ -96,6 +96,10 @@ def build_multi_lora_optimizer(
         "sharding replaces byte-level ZeRO"
     )
     assert not config.fp16, "multi-LoRA per-slot optimizers require bf16 (no dynamic loss scaler)"
+    assert (config.optimizer or "").lower() == "adam", (
+        "multi-LoRA per-slot optimizers only implement Adam semantics (state init, "
+        f"slot retirement cleanup, step clocks); got optimizer={config.optimizer!r}"
+    )
 
     pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
@@ -124,9 +128,7 @@ def build_multi_lora_optimizer(
                 if getattr(child, "optimizer", None) is not None and child.get_parameters()
             ]
             assert children, f"adapter slot {slot} produced no optimizer children"
-            slot_child_indices[slot] = list(
-                range(len(base_optimizers), len(base_optimizers) + len(children))
-            )
+            slot_child_indices[slot] = list(range(len(base_optimizers), len(base_optimizers) + len(children)))
             for child in children:
                 for group in child.param_groups:
                     group["miles_multi_lora_slot"] = slot
@@ -135,9 +137,7 @@ def build_multi_lora_optimizer(
     finally:
         config.bf16 = reset_bf16
 
-    optimizer = LayerWiseDistributedOptimizer(
-        base_optimizers, config, pg_collection, init_state_fn_list=init_fns
-    )
+    optimizer = LayerWiseDistributedOptimizer(base_optimizers, config, pg_collection, init_state_fn_list=init_fns)
 
     # LayerWise aggregates grad stats globally (params are scattered across DP
     # ranks at whole-parameter granularity), so per-child norm/clip reductions

@@ -6,19 +6,16 @@ from pathlib import Path
 
 import ray
 
-from miles.ray.multi_lora_controller import create_controller, get_multi_lora_controller
+from miles.ray.multi_lora.controller import create_multilora_controller, get_multi_lora_controller
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
 from miles.utils.adapter_config import parse_adapter_run_yaml
 from miles.utils.arguments import parse_args
-from miles.utils.multi_lora import EmptyBatchTimeoutError, define_new_adapter_metrics
 from miles.utils.audit_utils.process_identity import MainProcessIdentity
 from miles.utils.logging_utils import configure_logger
+from miles.utils.multi_lora import EmptyBatchTimeoutError, define_new_adapter_metrics
 from miles.utils.tracking_utils.tracking import init_tracking
 
 logger = logging.getLogger(__name__)
-
-ROLLOUT_FUNCTION_PATH = "examples.multi_lora.multi_lora_async_rollout.generate_rollout_multi_lora"
-DATA_SOURCE_PATH = "examples.multi_lora.multi_lora_data_source_async.MultiLoRAAsyncDataSource"
 
 
 def _is_empty_batch_timeout(task_error: ray.exceptions.RayTaskError) -> bool:
@@ -34,17 +31,16 @@ async def main(args):
     ), "Colocation is not supported for fully-async training (generation needs continuous GPU; colocate time-shares)."
     configure_logger(args, source=MainProcessIdentity())
 
-    args.rollout_function_path = ROLLOUT_FUNCTION_PATH
-    args.data_source_path = DATA_SOURCE_PATH
-    args.rollout_global_dataset = True
-
+    # The multi-LoRA rollout fn / data source / global dataset flags are
+    # defaulted by miles_validate_args when --multi-lora-n-adapters > 0.
     pgs = create_placement_groups(args)
     init_tracking(args)
     rollout_manager, _num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
 
+    # Create a controller nclusing MultiLoRAController and MultiLoRAHTTPServer to manage lora
     router_ip, router_port = await rollout_manager.get_router_address.remote()
     args.sglang_router_ip, args.sglang_router_port = router_ip, router_port
-    controller = create_controller(args, f"http://{router_ip}:{router_port}")
+    controller = create_multilora_controller(args, f"http://{router_ip}:{router_port}")
     await controller.start.remote()
     host = await controller.http_host.remote()
     api_port = await controller.api_port.remote()

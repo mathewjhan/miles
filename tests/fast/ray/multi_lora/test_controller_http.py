@@ -14,12 +14,19 @@ from tests.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=60, suite="stage-a-cpu")
 
+from miles.ray.multi_lora.backend import MultiLoRABackend
+from miles.ray.multi_lora.http_server import MultiLoRAHTTPServer
 from miles.utils.adapter_config import AdapterRunConfig
-from miles.utils.multi_lora import RID_SEPARATOR, MultiLoRABackend, MultiLoRAHTTPServer
+from miles.utils.multi_lora import RID_SEPARATOR
+
+
+# Registration validates that the data path exists; the test file itself is a
+# convenient always-present stand-in.
+DATA_FILE = __file__
 
 
 def minimal_config(name: str) -> dict:
-    return {"data": f"/data/{name}.parquet", "save": f"/tmp/adapters/{name}"}
+    return {"data": DATA_FILE, "rm_type": "math", "save": f"/tmp/adapters/{name}"}
 
 
 class ControllerHarness:
@@ -147,7 +154,7 @@ async def test_register_json_config_validates_to_adapter_config():
     async with running_controller() as ctl:
         config = {
             "rank": 8,
-            "data": "/data/train.parquet",
+            "data": DATA_FILE,
             "save": "/tmp/adapters/A",
             "rm_type": "math",
         }
@@ -155,7 +162,7 @@ async def test_register_json_config_validates_to_adapter_config():
         assert status == 200
         record = ctl.backend.registry.find("A")
         assert isinstance(record.config, AdapterRunConfig)
-        assert record.config.data == "/data/train.parquet"
+        assert record.config.data == DATA_FILE
         assert Path(record.config.save) == Path("/tmp/adapters/A")
         assert record.config.input_key == "text"  # dataclass default
 
@@ -198,7 +205,8 @@ async def test_state_endpoint_reports_lifecycle_and_completed():
 
         # Re-registration reclaims the name; the completed record is dropped.
         status, _ = await ctl.api_post(
-            "/adapter_runs", {"name": "A", "config": {"data": "/data/A2.parquet", "save": "/tmp/adapters/A2"}}
+            "/adapter_runs",
+            {"name": "A", "config": {"data": DATA_FILE, "rm_type": "math", "save": "/tmp/adapters/A2"}},
         )
         assert status == 200
         assert await state_of("A") == "PENDING"

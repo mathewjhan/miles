@@ -9,15 +9,15 @@ register_cpu_ci(est_time=60, suite="stage-a-cpu")
 
 import pytest
 
+from miles.ray.multi_lora.backend import MultiLoRABackend
+from miles.ray.multi_lora.registry import AdapterRegistry, AdapterState
 from miles.utils.adapter_config import AdapterRunConfig
-from miles.utils.multi_lora import (
-    AdapterRegistry,
-    AdapterState,
-    MultiLoRABackend,
-    min_groups_per_dp_split,
-    make_rid,
-    parse_adapter,
-)
+from miles.utils.multi_lora import make_rid, min_groups_per_dp_split, parse_adapter
+
+
+# Registration validates that the data path exists; the test file itself is a
+# convenient always-present stand-in.
+DATA_FILE = __file__
 
 
 def make_args(max_adapters: int = 4, save: str | None = None, dp_size: int = 2) -> SimpleNamespace:
@@ -41,7 +41,7 @@ def make_config(save: str | None = None, **overrides) -> AdapterRunConfig:
     kwargs = dict(
         rank=8,
         alpha=16,
-        data="/d",
+        data=DATA_FILE,
         rollout_batch_size=4,
         n_samples_per_prompt=4,
         save=save,
@@ -229,7 +229,7 @@ def test_min_groups_per_dp_split():
 @pytest.mark.asyncio
 async def test_register_resolves_batch_shape_defaults(tmp_path):
     backend = make_backend(save=str(tmp_path))
-    await backend.register("A", AdapterRunConfig(data="/d"))
+    await backend.register("A", AdapterRunConfig(data=DATA_FILE, rm_type="math"))
     config = backend.registry.records["A"].config
     assert config.rollout_batch_size == 16  # <- args.rollout_batch_size
     assert config.n_samples_per_prompt == 4  # <- args.n_samples_per_prompt
@@ -363,3 +363,30 @@ async def test_register_fails_without_any_save_dir():
     backend = make_backend(save=None)
     with pytest.raises(ValueError, match="no save dir"):
         await backend.register("A", make_config())
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_missing_data_path(tmp_path):
+    # A nonexistent data path would otherwise kill the shared rollout producer
+    # thread at the first get_samples, stalling every adapter.
+    backend = make_backend(save=str(tmp_path))
+    with pytest.raises(ValueError, match="data path"):
+        await backend.register("A", make_config(data=str(tmp_path / "missing.jsonl")))
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_unresolvable_reward_config(tmp_path):
+    # No adapter rm_type/custom_rm_path and no process-wide --rm-type: every
+    # sample would fail reward computation and be dropped.
+    backend = make_backend(save=str(tmp_path))
+    with pytest.raises(ValueError, match="reward config"):
+        await backend.register("A", make_config(rm_type=None))
+
+
+@pytest.mark.asyncio
+async def test_register_accepts_reward_config_from_global_args(tmp_path):
+    args = make_args(save=str(tmp_path))
+    args.rm_type = "math"
+    backend = MultiLoRABackend(args, "http://unused")
+    await backend.register("A", make_config(rm_type=None))
+    assert backend.registry.records["A"].config.rm_type is None  # resolved at reward time via args

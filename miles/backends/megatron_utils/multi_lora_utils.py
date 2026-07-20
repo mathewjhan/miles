@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 from miles.backends.training_utils.parallel import get_parallel_state
-from miles.ray.multi_lora_controller import get_multi_lora_controller
+from miles.ray.multi_lora.controller import get_multi_lora_controller
 from miles.utils.adapter_config import AdapterRun
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,16 @@ def zero_optimizer_state_for_adapter(optimizer, model, idx: int) -> None:
         inner = getattr(chained_optimizer, "optimizer", chained_optimizer)
         if inner is None:
             continue
+        # TE/apex FusedAdam keeps the Adam clock per param GROUP, not per
+        # param: reset the retired slot's groups so the next tenant gets
+        # fresh bias correction (the per-param reset below only covers
+        # torch's AdamW fallback, whose clock lives in state["step"]).
+        for group in inner.param_groups:
+            if group.get("miles_multi_lora_slot") == idx and "step" in group:
+                if isinstance(group["step"], torch.Tensor):
+                    group["step"].zero_()
+                else:
+                    group["step"] = 0
         for param, state in inner.state.items():
             if id(param) not in target_main_params:
                 continue
@@ -150,8 +160,11 @@ def save_multi_lora_checkpoints(
     parallel_state = get_parallel_state()
     tp_rank = parallel_state.tp.rank
     pp_rank = parallel_state.pp.rank
-    is_dp_rank_0 = parallel_state.intra_dp.rank == 0
-    is_global_writer = is_dp_rank_0 and tp_rank == 0 and pp_rank == 0
+    # One writer per (tp, pp) shard: LoRA params are replicated across DP AND
+    # CP, so gate on the combined dp×cp group. Gating on intra_dp alone left
+    # every CP rank writing the same shard file and racing the os.replace.
+    is_dp_cp_rank_0 = parallel_state.intra_dp_cp.rank == 0
+    is_global_writer = is_dp_cp_rank_0 and tp_rank == 0 and pp_rank == 0
 
     target_modules_hf = (
         convert_target_modules_to_hf(list(args.target_modules))
@@ -172,14 +185,14 @@ def save_multi_lora_checkpoints(
 
         final_dir = config.save / "checkpoints" / f"step_{iteration}"
         tmp_dir = config.save / "checkpoints" / f"_tmp_step_{iteration}"
-        if is_dp_rank_0:
+        if is_dp_cp_rank_0:
             tmp_dir.mkdir(parents=True, exist_ok=True)
         if dist.is_initialized():
             dist.barrier()
 
         with expose_adapter_slot(model, adapter.slot):
             # Megatron checkpoints
-            if is_dp_rank_0:
+            if is_dp_cp_rank_0:
                 shard: dict[str, torch.Tensor] = {
                     name: param.data.cpu()
                     for batch in model
@@ -197,8 +210,12 @@ def save_multi_lora_checkpoints(
                     cpu=True,
                     show_progress=False,
                 ):
-                    # Safetensors format can't save aliased tensors, so need clone()
-                    hf_state[hf_name] = weight.clone()
+                    # The model allocates every slot at --lora-rank; slice the
+                    # export down to this adapter's real rank so the tensors
+                    # match the r written to adapter_config.json (PEFT refuses
+                    # the checkpoint otherwise). The weight-sync push path does
+                    # the same. clone(): safetensors can't save aliased views.
+                    hf_state[hf_name] = slice_lora_to_rank(hf_name, weight, config.rank).clone()
 
         if is_global_writer:
             save_safetensors(
@@ -293,8 +310,11 @@ def _deregister_adapter(adapter: AdapterRun, args, model, optimizer) -> None:
     # previous tenant's partially accumulated gradients.
     from miles.backends.megatron_utils.multi_lora_optimizer import zero_adapter_slot_grads
 
+    from miles.backends.megatron_utils.multi_lora_scheduler import drop_slot_scheduler
+
     zero_optimizer_state_for_adapter(optimizer, model, slot)
     zero_adapter_slot_grads(model, slot)
+    drop_slot_scheduler(optimizer, slot)
     optimizer.reload_model_params()
     logger.info(f"{log_prefix} cleared optimizer state and retained grads for slot {slot}")
 
@@ -308,9 +328,13 @@ def load_adapters(args, model, optimizer, adapters) -> int:
         dist.barrier(group=get_gloo_group())
     if not adapters:
         return 0
+    from miles.backends.megatron_utils.multi_lora_scheduler import install_slot_scheduler
+
     resume_steps: dict[str, int] = {}
     for adapter in adapters:
         resume_steps[adapter.name] = _register_adapter(adapter, model)
+        # Per-adapter LR/WD schedule, positioned at the resumed step count.
+        install_slot_scheduler(args, optimizer, adapter, resume_steps[adapter.name])
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
     optimizer.reload_model_params()
@@ -338,3 +362,98 @@ def cleanup_adapters(args, model, optimizer, adapters) -> int:
         for adapter in adapters:
             ray.get(get_multi_lora_controller().free_slot.remote(adapter.name))
     return len(adapters)
+
+
+def step_stepped_adapter_slots(args, model, optimizer, rollout_data, rollout_id: int, step_id: int) -> float:
+    """Optimizer-step the slots whose adapter batch completes with this train
+    batch, and advance their per-adapter LR/WD schedules. Returns the max grad
+    norm across stepped slots (0.0 when none stepped).
+
+    The shared opt_param_scheduler is never stepped under multi-LoRA: schedule
+    parameters inherit the args, only the position is per adapter.
+    """
+    from miles.backends.megatron_utils.multi_lora_optimizer import step_adapter_slots
+    from miles.backends.megatron_utils.multi_lora_scheduler import step_slot_schedulers
+    from miles.utils.tracking_utils.structured_log import log_structured
+
+    # slot -> adapter_global_batch_size for adapter batches completing now.
+    step_batch_sizes = dict(rollout_data.get("step_adapter_batch_sizes", {}))
+    grad_norms_by_slot = step_adapter_slots(
+        optimizer,
+        model,
+        step_batch_sizes,
+        clip_grad=args.clip_grad,
+    )
+
+    if lr_by_slot := step_slot_schedulers(optimizer, step_batch_sizes):
+        log_structured(
+            logger.info,
+            op="adapter_lr",
+            rollout=rollout_id,
+            step=step_id,
+            **{f"slot_{slot}": lr for slot, lr in lr_by_slot.items()},
+        )
+    return max(grad_norms_by_slot.values(), default=0.0)
+
+
+def commit_trained_batch(rollout_data, rollout_id: int, pending_push: set) -> None:
+    """A train call landed: schedule the stepped adapters' engine push and
+    commit the batch on the controller (main rank only). The stepped set ships
+    with the train data, identical on all ranks."""
+    from miles.backends.megatron_utils.initialize import is_first_replica_megatron_main_rank
+
+    pending_push.update(rollout_data.get("step_adapter_names", []))
+    if is_first_replica_megatron_main_rank():
+        ray.get(get_multi_lora_controller().mark_batch_trained.remote(rollout_id))
+
+
+def save_due_adapter_checkpoints(args, model) -> bool:
+    """Save per-adapter checkpoints for adapters at a save-interval multiple
+    without a checkpoint on disk. Rank 0 picks and broadcasts, so the
+    collective export lines up. Returns False when nothing is due."""
+    from miles.backends.megatron_utils.initialize import is_first_replica_megatron_main_rank
+    from miles.utils.distributed_utils import get_gloo_group
+
+    due_buffer = [None]
+    if is_first_replica_megatron_main_rank() and args.save_interval is not None:
+        snapshot = ray.get(get_multi_lora_controller().snapshot.remote())
+        adapters = {**snapshot["active"], **snapshot["retiring"]}
+        due_buffer[0] = {
+            name: adapter
+            for name, adapter in adapters.items()
+            if adapter.step > 0
+            and adapter.step % args.save_interval == 0
+            and adapter.config.save is not None
+            and not (Path(adapter.config.save) / "checkpoints" / f"step_{adapter.step}").exists()
+        }
+    if dist.is_initialized():
+        dist.broadcast_object_list(due_buffer, src=0, group=get_gloo_group())
+    due_adapters = due_buffer[0]
+    if not due_adapters:
+        return False
+    adapter_steps = {name: adapter.step for name, adapter in due_adapters.items()}
+    save_multi_lora_checkpoints(args, model, adapter_steps, due_adapters)
+    return True
+
+
+def select_adapters_to_push(loaded_adapters: dict, pending_push: set, has_new_engines: bool) -> tuple[dict, list]:
+    """Pick the adapters whose engine-side weights are stale: newly loaded +
+    stepped since the last push (tracked identically on every rank, so
+    per-adapter TP collectives line up). New engines need every loaded adapter.
+
+    Returns (adapters to push keyed by name, names getting a version bump).
+    Version bumps drive the staleness filter, so only adapters whose weights
+    actually changed get one: a new-engine full resync pushes every loaded
+    adapter, but re-sending unchanged weights must not age the unchanged
+    adapters' buffered groups toward the drop limit.
+    """
+    pending = pending_push & set(loaded_adapters)
+    push_names = set(loaded_adapters) if has_new_engines else pending
+    return {name: loaded_adapters[name] for name in sorted(push_names)}, sorted(pending)
+
+
+def commit_weight_push(version_update_names: list, is_main_rank: bool) -> None:
+    """A weight push landed: bump the pushed adapters' slot versions on the
+    controller (promotes PENDING adapters to ACTIVE)."""
+    if version_update_names and is_main_rank:
+        ray.get(get_multi_lora_controller().record_weight_update.remote(version_update_names))

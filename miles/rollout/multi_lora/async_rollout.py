@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from miles.ray.multi_lora_controller import AdaptersCache, get_multi_lora_controller
+from miles.ray.multi_lora.controller import AdaptersCache, get_multi_lora_controller
 from miles.rollout.base_types import RolloutFnTrainOutput
 from miles.rollout.filter_hub.base_types import call_dynamic_filter
 from miles.rollout.generate_utils.prefill_logprobs import recompute_samples_rollout_logprobs_via_prefill
@@ -82,6 +82,24 @@ class GroupBuffer:
         """Remove and return the n oldest groups (queue.Queue-style API)."""
         return [self._groups.popleft() for _ in range(n_groups)]
 
+    def drop_foreign(self, registration_id: str) -> int:
+        """Drop groups stamped by a different registration of this adapter
+        name: an in-flight generation of a retired tenant can land after the
+        buffer was reset for a same-name re-registration. Unstamped groups
+        (no adapter view at submission time) are kept. Returns the drop count."""
+        if not self._groups:
+            return 0
+        kept: deque[Group] = deque(maxlen=MAX_BUFFERED_GROUPS)
+        dropped = 0
+        for group in self._groups:
+            stamped = first_sample(group).metadata.get("registration_id")
+            if stamped is not None and stamped != registration_id:
+                dropped += 1
+            else:
+                kept.append(group)
+        self._groups = kept
+        return dropped
+
     def drop_stale(self, current_version: int, max_staleness: int | None) -> list[int]:
         """Drop groups generated too many weight versions ago; returns the
         staleness of each dropped group (for metrics)."""
@@ -129,19 +147,23 @@ async def process_group(
     stamped at submission time (what the staleness filter compares against)."""
     adapter_name = group[0].adapter.name if group and group[0].adapter else None
     submission_version: int | None = None
+    submission_registration: str | None = None
     if adapter_name is not None:
         adapter = await AdaptersCache().get(adapter_name)
         submission_version = adapter.version if adapter is not None else None
+        submission_registration = adapter.registration_id if adapter is not None else None
 
     if submission_version is not None:
         for s in group:
             s.metadata["slot_version"] = submission_version
+            s.metadata["registration_id"] = submission_registration
 
     result = await generate_fn(args, group, sampling_params)
 
     if submission_version is not None:
         for s in iter_group_samples(result):
             s.metadata["slot_version"] = submission_version
+            s.metadata["registration_id"] = submission_registration
 
     if any(s.status == Sample.Status.ABORTED for s in iter_group_samples(result)):
         for s in iter_group_samples(result):
@@ -302,6 +324,12 @@ class AsyncMultiLoRAWorker:
         # batches, so adapters are served round-robin.
         self.rotation: deque[str] = deque()
         self.metrics = MultiLoRAWorkerMetrics()
+        # Last seen registration id per adapter name; a change means the name
+        # was re-registered and inherited buffer/metric state must be dropped.
+        self.registrations: dict[str, str] = {}
+        # Set when run_loop dies; collect_batch surfaces it instead of letting
+        # the batch collection time out with a misleading empty-batch error.
+        self.failure: Exception | None = None
 
     @classmethod
     def get_or_create(cls, args, data_source, generate_fn: GenerateFn, concurrency: int = None):
@@ -351,6 +379,11 @@ class AsyncMultiLoRAWorker:
                     active.add(asyncio.create_task(self.process_and_enqueue(samples[0])))
 
                 await asyncio.sleep(0.01)
+        except Exception as e:
+            # Typically the data source: this stops production for EVERY
+            # adapter, so record the cause for collect_batch to surface.
+            self.failure = e
+            logger.exception("multi-LoRA producer failed; generation is stopped")
         finally:
             for task in active:
                 task.cancel()
@@ -413,6 +446,19 @@ class AsyncMultiLoRAWorker:
                 if name not in adapters:
                     self.buffers.pop(name)
                     self.metrics.discard_adapter(name)
+                    self.registrations.pop(name, None)
+
+            # A re-registered name is a new tenant. The sweep above never ran
+            # when no generate happened between retirement and re-registration
+            # (e.g. the last adapter retired and the driver idled), so drop any
+            # buffered groups and partial stats inherited from the old tenant.
+            for name, adapter in adapters.items():
+                previous = self.registrations.get(name)
+                if previous is not None and previous != adapter.registration_id:
+                    self.buffers.pop(name, None)
+                    self.metrics.discard_adapter(name)
+                    logger.warning(f"Adapter '{name}' was re-registered; dropped the previous tenant's buffered state")
+                self.registrations[name] = adapter.registration_id
 
             # Keep the rotation in sync with live adapters.
             self.rotation = deque(name for name in self.rotation if name in adapters)
@@ -428,6 +474,10 @@ class AsyncMultiLoRAWorker:
                     buffer = self.buffers[name]
                     if dropped := buffer.drop_stale(adapter.version, max_staleness):
                         self.metrics.record_stale_drops(name, dropped)
+                    # In-flight stragglers of a retired same-name tenant that
+                    # landed after the re-registration sweep reset the buffer.
+                    if foreign := buffer.drop_foreign(adapter.registration_id):
+                        logger.warning(f"Dropped {foreign} buffered groups from a previous registration of '{name}'")
                     min_groups_per_pop = min_groups_per_dp_split(adapter.config.n_samples_per_prompt, dp_size)
                     trainable_groups = len(buffer) // min_groups_per_pop * min_groups_per_pop
                     remaining_allowed_groups = max(0, remaining_groups(adapter) - group_counts.get(name, 0))
@@ -468,6 +518,10 @@ async def collect_batch(args, worker: AsyncMultiLoRAWorker, snapshot: dict) -> T
     last_warning = time.time()
 
     while total_samples < target_samples:
+        if worker.failure is not None:
+            raise RuntimeError(
+                "multi-LoRA producer thread died; generation is stalled for every adapter"
+            ) from worker.failure
         groups, group_counts = worker.get_groups(snapshot, target_samples - total_samples, group_counts)
         if groups:
             collected.extend(groups)
@@ -540,9 +594,7 @@ async def generate_rollout_multi_lora_async(
         head.metadata["step_slots"] = list(batch.step_slots)
         head.metadata["step_adapter_names"] = list(batch.step_names)
 
-    await get_multi_lora_controller().record_batch_adapters.remote(
-        rollout_id, batch.group_counts, batch.step_names
-    )
+    await get_multi_lora_controller().record_batch_adapters.remote(rollout_id, batch.group_counts, batch.step_names)
 
     if (x := args.rollout_sample_filter_path) is not None:
         load_function(x)(args, data)

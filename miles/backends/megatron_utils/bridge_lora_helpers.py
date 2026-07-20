@@ -14,7 +14,7 @@ from megatron.core.utils import get_attr_wrapped_model
 from miles.utils.hf_config import load_hf_config
 from miles.utils.multi_lora import is_multi_lora_enabled
 
-from .lora_utils import create_lora_instance, patch_param_grad_buffer_for_colocate_mode_lora
+from .lora_utils import patch_param_grad_buffer_for_colocate_mode_lora
 
 
 @dataclass
@@ -117,6 +117,8 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
 
         lora = create_multi_lora_instance(args)
     else:
+        from .lora_utils import create_lora_instance
+
         lora = create_lora_instance(args)
 
     def apply_lora_hook(model_chunks):
@@ -139,7 +141,14 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
         # Per-slot LayerWise optimizers: plain DDP all-reduce keeps full grads on
         # every rank (whole-param sharding + retained-gradient idempotency).
         use_distributed_optimizer = False
-    ddp_config = DistributedDataParallelConfig(use_distributed_optimizer=use_distributed_optimizer)
+    ddp_config = DistributedDataParallelConfig(
+        use_distributed_optimizer=use_distributed_optimizer,
+        # Honor --accumulate-allreduce-grads-in-fp32 on this path too. It
+        # matters doubly for multi-LoRA: gradients are RETAINED in this buffer
+        # across train batches (per-adapter accumulation), so a bf16 buffer
+        # compounds rounding error with every accumulated batch and re-reduce.
+        grad_reduce_in_fp32=args.accumulate_allreduce_grads_in_fp32,
+    )
     ddp_config.finalize()
 
     if args.offload_train:

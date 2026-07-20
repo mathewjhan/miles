@@ -6,9 +6,10 @@ from typing import Any
 
 import ray
 
+from miles.ray.multi_lora.backend import MultiLoRABackend
+from miles.ray.multi_lora.http_server import MultiLoRAHTTPServer
 from miles.utils.adapter_config import AdapterRun
 from miles.utils.misc import SingletonMeta, get_current_node_ip, load_function
-from miles.utils.multi_lora import MultiLoRABackend, MultiLoRAHTTPServer
 from miles.utils.ray_utils import compute_ray_pin_head_options
 
 CONTROLLER_NAME = "miles_multi_lora_controller"
@@ -112,7 +113,7 @@ class MultiLoRAController:
         return self.server.actual_api_port
 
 
-def create_controller(args, router_url: str, host: str = "0.0.0.0"):
+def create_multilora_controller(args, router_url: str, host: str = "0.0.0.0"):
     # Pinned to the head node so the API sits at a port-forwardable address.
     return MultiLoRAController.options(
         name=CONTROLLER_NAME,
