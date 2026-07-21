@@ -46,6 +46,11 @@ class ActorOutputProjection:
         chunks = model if isinstance(model, (list, tuple)) else [model]
         adapter: ActorOutputProjection | None = None
         for chunk in chunks:
+            # Only chunks that own the model head build an output_layer; on
+            # non-last PP stages (post_process=False) the attribute doesn't
+            # exist at all, so probing it directly would raise.
+            if not get_attr_wrapped_model(chunk, "post_process", allow_none=False):
+                continue
             output_layer = get_attr_wrapped_model(chunk, "output_layer", allow_none=True)
             if output_layer is None:
                 continue
