@@ -573,3 +573,43 @@ class TestChatFakeStreaming:
                 finish_reason = choice.finish_reason
         assert content == expected_content
         assert finish_reason == "stop"
+
+
+def test_max_seq_len_rejects_over_budget_prompt():
+    """A session whose next prompt exceeds max_seq_len gets a terminal 400
+    before the backend is called, and nothing is recorded."""
+
+    def process_fn(prompt: str) -> ProcessResult:
+        raise AssertionError("backend must not be called for over-budget requests")
+
+    with with_mock_server(process_fn=process_fn) as backend:
+        args = SimpleNamespace(
+            miles_router_timeout=30,
+            hf_checkpoint="Qwen/Qwen3-0.6B",
+            chat_template_path=None,
+            apply_chat_template_kwargs={"enable_thinking": False},
+            tito_model="default",
+            trajectory_manager="linear_trajectory",
+            session_server_instance_id=uuid.uuid4().hex,
+            max_seq_len=8,
+        )
+        server_obj = SessionServer(args, backend_url=backend.url)
+
+        port = find_available_port(31100)
+        server = UvicornThreadServer(server_obj.app, host="127.0.0.1", port=port)
+        server.start()
+        url = f"http://127.0.0.1:{port}"
+
+        try:
+            session_id = _create_session(url)
+
+            # Prompt alone (~15+ template tokens) already exceeds the budget of 8.
+            resp = _post_chat(url, session_id, {"messages": [{"role": "user", "content": "hello world"}]})
+            assert resp.status_code == 400
+            assert "session context limit exceeded" in resp.json()["error"]
+
+            # The failed request must not be recorded in the session.
+            records = requests.get(f"{url}/sessions/{session_id}", timeout=5.0).json()["records"]
+            assert records == []
+        finally:
+            server.stop()
