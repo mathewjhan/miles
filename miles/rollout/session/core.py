@@ -249,13 +249,6 @@ class SessionCore:
                 tools=request_body.get("tools"),
                 tito_tokenizer=tito_tokenizer,
             )
-            # Enforce --max-seq-len pre-generation: the trainer already
-            # truncates/discards anything past it (see truncate_samples_by_total_tokens),
-            # so a prompt over the limit can never produce usable tokens. Reject
-            # before sampling; failed requests are never recorded, so the session
-            # stays consistent and the agent can only stop or shrink its next prompt.
-            # max_seq_len only exists on the args namespace when the generate
-            # function registered it; unset means no cap (e.g. eval flows).
             max_seq_len = getattr(self.args, "max_seq_len", None)
             if max_seq_len is not None and len(prompt_token_ids) > max_seq_len:
                 raise SessionContextLimitExceededError(

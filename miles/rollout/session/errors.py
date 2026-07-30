@@ -34,13 +34,7 @@ class MessageValidationError(SessionError):
 
 
 class SessionContextLimitExceededError(SessionError):
-    """Raised when a session's next prompt exceeds the training max_seq_len.
-
-    Mirrors SGLang's own context-length 400 (clients see the same class of
-    terminal error), but fires at max_seq_len — typically far below the
-    model's context window — so runaway trajectories stop before sampling
-    tokens the trainer would discard anyway.
-    """
+    """Raised when a session's next prompt exceeds max_seq_len."""
 
     status_code: int = 400
 

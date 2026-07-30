@@ -73,8 +73,12 @@ async def run(
     )
 
     session_url = f"{base_url}/v1"
+    external_url = os.getenv("MILES_ROUTER_EXTERNAL_URL")
     external_host = os.getenv("MILES_ROUTER_EXTERNAL_HOST")
-    if external_host:
+    if external_url:
+        parsed = urlparse(session_url)
+        session_url = f"{external_url.rstrip('/')}{parsed.path}"
+    elif external_host:
         parsed = urlparse(session_url)
         port = parsed.port
         netloc = f"{external_host}:{port}" if port else external_host
@@ -92,14 +96,14 @@ async def run(
         request["max_seq_len"] = int(max_seq_len)
 
     session_server_id = metadata.get("session_server_id")
-    if session_server_id is not None:
+    if session_server_id is not None and not external_url:
         if external_host:
             port = urlsplit(f"http://{session_server_id}").port
             session_server_id = f"{external_host}:{port}"
         request["session_server_id"] = session_server_id
 
     session_server_instance_id = metadata.get("session_server_instance_id")
-    if session_server_instance_id is not None:
+    if session_server_instance_id is not None and not external_url:
         request["session_server_instance_id"] = session_server_instance_id
 
     try:
