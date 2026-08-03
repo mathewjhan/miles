@@ -107,9 +107,15 @@ def add_sglang_arguments(parser):
             # Avoid double prefixing if dest somehow already starts with sglang_
             if not original_dest.startswith("sglang_"):
                 final_kwargs["dest"] = f"sglang_{original_dest}"
-        # If 'dest' is not explicitly provided (or is None/not a string),
-        # argparse will derive 'dest' from the (now prefixed) flag names.
-        # E.g., if the first flag is "--sglang-foo-bar", argparse sets dest to "sglang_foo_bar".
+        elif "dest" not in final_kwargs:
+            # argparse derives dest from the first alias, so store parallel sizes under SGLang's short field names.
+            for item_flag in name_or_flags:
+                if not isinstance(item_flag, str) or not item_flag.startswith("--"):
+                    continue
+                canonical_dest = item_flag[2:].replace("-", "_")
+                if canonical_dest in ("tp_size", "dp_size", "pp_size", "ep_size"):
+                    final_kwargs["dest"] = f"sglang_{canonical_dest}"
+                    break
 
         old_add_argument(*new_name_or_flags_list, **final_kwargs)
 
@@ -146,6 +152,9 @@ def validate_args(args):
 
     if args.sglang_dp_size > 1:
         assert args.sglang_enable_dp_attention
+
+    if args.sglang_enable_dp_attention:
+        args.router_dp_aware = True
 
     if args.sglang_router_policy is None and args.use_session_server:
         args.sglang_router_policy = "manual"

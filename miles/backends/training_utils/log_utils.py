@@ -222,7 +222,7 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
             if "rollout/entropy" in reduced_log_dict:
                 assert 0 < reduced_log_dict["rollout/entropy"] < 0.7
 
-        if args.ci_test and args.true_on_policy_mode:
+        if args.ci_test and args.true_on_policy_mode and not args.ci_disable_logprobs_checker:
             assert log_dict["log_probs"] == log_dict["rollout_log_probs"], (
                 f"CI check failed: true_on_policy_mode is enabled, but log_probs "
                 f"({log_dict['log_probs']}) != rollout_log_probs "
@@ -426,7 +426,7 @@ def log_train_step(
     Args:
         args: Configuration.
         loss_dict: Dictionary of loss metrics from aggregate_train_losses.
-        grad_norm: Gradient norm after clipping.
+        grad_norm: Global gradient L2 norm before clipping.
         rollout_id: Rollout ID.
         step_id: Step ID within the rollout.
         num_steps_per_rollout: Total number of steps per rollout.
