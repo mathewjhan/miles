@@ -494,6 +494,68 @@ async def reward_func(args: Namespace, sample: Sample, **kwargs: Any) -> dict[st
     return reward_payload
 
 
+def _topk_vs_top0_diagnostic(sample: Sample, reward_payload: dict[str, Any]) -> dict[str, float] | None:
+    """Temporary diagnostic: compare the top-k position scalar against the
+    top-0 sampled-token scalar on the same trajectory.
+
+    Both estimators reduce to one advantage coefficient per response position;
+    this prints their per-sample relationship (correlation, sign agreement,
+    magnitudes) so a run can show directly whether the top-k coefficient
+    carries the same learning signal as the sampled-token one.
+    """
+    try:
+        rl = sample.response_length
+        if rl == 0 or sample.rollout_log_probs is None:
+            return None
+        t_sampled = _teacher_sampled_log_probs(reward_payload["teacher"], rl)
+        s_sampled = torch.tensor(sample.rollout_log_probs[-rl:], dtype=torch.float32)
+        top0 = s_sampled - t_sampled
+        topk = sample.opd_reverse_kl.float()
+        if sample.loss_mask is not None:
+            mask = torch.tensor(sample.loss_mask[-rl:], dtype=torch.bool)
+        else:
+            mask = torch.ones(rl, dtype=torch.bool)
+        a, b = top0[mask], topk[mask]
+        if a.numel() < 2:
+            return None
+        corr = float(torch.corrcoef(torch.stack([a, b]))[0, 1])
+        row = {
+            "n": float(a.numel()),
+            "top0_mean": float(a.mean()),
+            "top0_abs": float(a.abs().mean()),
+            "top0_max": float(a.abs().max()),
+            "topk_mean": float(b.mean()),
+            "topk_abs": float(b.abs().mean()),
+            "topk_max": float(b.abs().max()),
+            "corr": corr,
+            "sign_agree": float((a.sign() == b.sign()).float().mean()),
+            # Positions whose top-k coefficient is ~zero contribute no gradient.
+            "topk_dead_frac": float((b.abs() < 1e-4).float().mean()),
+        }
+        print(
+            "[opd-diag] "
+            + " ".join(f"{k}={v:.4f}" if k != "n" else f"n={int(v)}" for k, v in row.items()),
+            flush=True,
+        )
+        return row
+    except Exception as e:  # diagnostic must never break the reward path
+        print(f"[opd-diag] failed: {e}", flush=True)
+        return None
+
+
+def _print_topk_vs_top0_summary(rows: list[dict[str, float]]) -> None:
+    if not rows:
+        return
+    keys = [k for k in rows[0] if k != "n"]
+    total_n = int(sum(r["n"] for r in rows))
+    means = {k: sum(r[k] * r["n"] for r in rows) / max(total_n, 1) for k in keys}
+    print(
+        f"[opd-diag-batch] samples={len(rows)} positions={total_n} "
+        + " ".join(f"{k}={v:.4f}" for k, v in means.items()),
+        flush=True,
+    )
+
+
 def post_process_rewards(args: Namespace, samples: list[Sample], **kwargs: Any) -> tuple[list[float], list[float]]:
     """Extract OPD signals from teacher responses.
 
@@ -508,8 +570,13 @@ def post_process_rewards(args: Namespace, samples: list[Sample], **kwargs: Any) 
     response_lengths = [sample.response_length for sample in samples]
 
     if _get_opd_top_k(args) > 0:
+        diag_rows = []
         for sample, reward in zip(samples, raw_rewards, strict=True):
             sample.opd_reverse_kl = _compute_topk_reverse_kl(args, sample, reward)
+            row = _topk_vs_top0_diagnostic(sample, reward)
+            if row is not None:
+                diag_rows.append(row)
+        _print_topk_vs_top0_summary(diag_rows)
         scalar_rewards = [0.0] * len(samples)
         return scalar_rewards, scalar_rewards
 
