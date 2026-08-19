@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from itertools import groupby
 
+import httpx
 import numpy as np
 import pybase64
 import pytest
@@ -115,6 +116,8 @@ def verify_samples(actual: Sample | list[Sample], expected: list[ExpectedSampleI
 
         actual_partial = replace(
             deepcopy(actual_item),
+            index=None,
+            rollout_id=None,
             tokens=[],
             loss_mask=[],
             rollout_log_probs=[],
@@ -123,12 +126,14 @@ def verify_samples(actual: Sample | list[Sample], expected: list[ExpectedSampleI
         # Session server populates diagnostic metadata (token IDs,
         # trim config, mismatch analysis, dashboard lifecycle timing) that
         # varies with mock setup. Strip these before comparing structure.
-        for key in ("tito_session_mismatch", "accumulated_token_ids", "max_trim_tokens", "lifecycle"):
+        for key in ("tito_session_mismatch", "accumulated_token_ids", "max_trim_tokens", "lifecycle", "leaf"):
             actual_partial.metadata.pop(key, None)
         assert actual_partial == expected_item.partial_sample
 
 
 def _run_generate(variant: str, env: GenerateEnv, sample: Sample, sampling_params: dict | None = None):
+    if is_agentic_variant(variant) and sample.index is None:
+        sample.index = 0
     return run_generate(env, sample, sampling_params, variant=variant)
 
 
@@ -674,12 +679,20 @@ class TestAgentCollectionFailure:
     def variant(self, request):
         return request.param
 
-    def test_collect_timeout_aborts_sample_but_other_errors_propagate(
-        self, variant, generation_env, monkeypatch, caplog
+    @pytest.mark.parametrize(
+        "collect_error",
+        [
+            pytest.param(asyncio.TimeoutError(), id="timeout"),
+            # A broken connection to the session server is one sample's problem: in-place
+            # weight updates pause generation under in-flight requests, so letting it
+            # propagate takes the whole run down over a routine event.
+            pytest.param(httpx.ReadError("connection closed"), id="transport"),
+        ],
+    )
+    def test_collect_transient_failure_aborts_sample_but_other_errors_propagate(
+        self, variant, generation_env, monkeypatch, caplog, collect_error
     ):
-        collect_error = asyncio.TimeoutError()
-
-        async def fail_collect(_tracer, _input_sample, *, max_seq_len):
+        async def fail_collect(_tracer, _input_sample, *, max_seq_len, agent_metadata=None):
             raise collect_error
 
         monkeypatch.setattr(
@@ -690,10 +703,10 @@ class TestAgentCollectionFailure:
         with caplog.at_level(logging.WARNING):
             result = _run_generate(variant, generation_env, input_sample)
 
-        assert isinstance(result.sample, Sample)
-        assert result.sample.status == Sample.Status.ABORTED
+        [sample] = listify(result.sample)
+        assert sample.status == Sample.Status.ABORTED
         assert input_sample.status == Sample.Status.PENDING
-        assert "Timed out collecting samples" in caplog.text
+        assert "Failed collecting samples" in caplog.text
 
         collect_error = RuntimeError("assembly failed")
         with pytest.raises(RuntimeError, match="assembly failed"):
@@ -739,5 +752,5 @@ class TestAgentNoRecords:
 
         SingletonMeta.clear_all_instances()
 
-        assert isinstance(result.sample, Sample)
-        assert result.sample.status == Sample.Status.ABORTED
+        [sample] = listify(result.sample)
+        assert sample.status == Sample.Status.ABORTED
