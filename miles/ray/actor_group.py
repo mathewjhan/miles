@@ -112,12 +112,16 @@ class RayTrainGroup:
         """Save actor model"""
         await self._broadcast("save_model", rollout_id, force_sync=force_sync)
 
+    async def export_hf(self, rollout_id: int, path: str):
+        """Export current weights as an HF checkpoint (collective across all ranks)."""
+        await self._broadcast("export_hf", rollout_id, path)
+
     async def update_weights(self, rollout_id: int | None = None):
         """Broadcast weights from rank 0 to all other ranks."""
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
-        if self.args.use_fault_tolerance:
+        if self.args.use_fault_tolerance and "rollout" in self.args.ft_components:
             await self.rollout_manager.recover_updatable_engines.remote()
 
         info = await self.rollout_manager.get_updatable_engines_and_lock.remote()

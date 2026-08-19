@@ -18,8 +18,8 @@ DATASET_NAME = "chenhegu/geo3k_imgurl"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
+    U.exec_command_cpu("mkdir -p /root/models /root/datasets")
+    U.exec_command_cpu(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
     U.hf_download_dataset(DATASET_NAME)
 
 
@@ -101,7 +101,6 @@ def execute():
 
     extra_env_vars = {
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-        "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
     }
 
     U.execute_train(
