@@ -31,6 +31,7 @@ from miles.rollout.session.samples.merge import (
 )
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
 from miles.utils.lora import LORA_ADAPTER_NAME, is_lora_enabled
+from miles.utils.multi_lora import is_multi_lora_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +188,7 @@ def prepare_chat_request(body: bytes, args, tito_tokenizer) -> tuple:
     # token IDs still come from logprobs below.
     request_body["no_stop_trim"] = False
     # Serve the adapter being trained instead of the base weights.
-    if is_lora_enabled(args):
+    if is_lora_enabled(args) and not is_multi_lora_enabled(args):
         request_body["lora_path"] = LORA_ADAPTER_NAME
     # FIXME(session): Only nested `chat_template_kwargs` reach the local renderer;
     # top-level `reasoning` and `reasoning_effort` are not mapped to template kwargs.
