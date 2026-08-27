@@ -109,7 +109,7 @@ def build_multi_lora_optimizer(
             for child in children:
                 for group in child.param_groups:
                     group["miles_multi_lora_slot"] = slot
-                base_optimizers.append(child)
+                base_optimizers.append(child.optimizer)
                 init_fns.append(_adam_init_state_fn)
     finally:
         config.bf16 = reset_bf16
