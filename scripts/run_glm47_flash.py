@@ -13,14 +13,19 @@ class ScriptArgs(U.ExecuteTrainConfig):
     model_org: str = "zai-org"
     model_name: str = "GLM-4.7-Flash"
     megatron_model_type: str = "glm4.7-flash"
-    num_gpus_per_node: int = 8
-    hardware: Literal["H200", "B200"] = "H200"
+    num_gpus_per_node: int | None = None
+    hardware: Literal["auto", "H200", "B200"] = "auto"
+    rollout_num_gpus_per_engine: int | None = None  # None => derive from hardware
     sglang_attention_backend: str | None = None
     enable_eval: bool = True
     extra_args: str = ""
     data_dir: str = "/root/datasets"
     model_dir: str = "/root/models"
     megatron_path: str = "/root/Megatron-LM"
+
+    def __post_init__(self):
+        self.hardware = U.resolve_hardware(self)
+        self.num_gpus_per_node = self.num_gpus_per_node or U.NUM_GPUS_OF_HARDWARE[self.hardware]
 
 
 def prepare(args: ScriptArgs):
@@ -72,7 +77,7 @@ def execute(args: ScriptArgs):
     eval_args = ""
     if (args.mode != "debug_minimal") and args.enable_eval:
         eval_args += (
-            # "--eval-interval 20 "
+            "--eval-interval 20 "
             f"--eval-prompt-data aime24 {args.data_dir}/aime-2024/aime-2024.jsonl "
             "--n-samples-per-eval-prompt 16 "
             "--eval-max-response-len 16384 "
@@ -117,8 +122,14 @@ def execute(args: ScriptArgs):
     )
 
     # GLM-4.7-Flash has 20 attention heads, so rollout TP must divide 20.
+    rollout_num_gpus_per_engine = (
+        args.rollout_num_gpus_per_engine
+        if args.rollout_num_gpus_per_engine is not None
+        else (2 if args.hardware == "B200" else 1)
+    )
+
     sglang_args = (
-        f"--rollout-num-gpus-per-engine {2 if args.hardware == 'B200' else 1} "
+        f"--rollout-num-gpus-per-engine {rollout_num_gpus_per_engine} "
         "--sglang-mem-fraction-static 0.7 "
         # EAGLE speculative decoding (MTP)
         "--sglang-speculative-algorithm EAGLE "

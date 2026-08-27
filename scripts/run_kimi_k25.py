@@ -8,7 +8,7 @@ Kimi-K2.5 is a MoE + MLA model (61 layers, 384 experts) shipped as an INT4
 weights for the SGLang rollout while Megatron loads a BF16 reference via the
 HF<->Megatron bridge (`--megatron-to-hf-mode bridge`), so there is no offline
 `torch_dist` conversion step. The architecture is shared with Kimi-K2-Thinking,
-whose Megatron MODEL_ARGS we reuse (`scripts/models/kimi-k2-thinking.py`).
+while `scripts/models/kimi-k25.py` preserves K2.5's YaRN parameters.
 
 =====================
 
@@ -48,6 +48,8 @@ INT4_GROUP_SIZE = 32
 # Megatron bridge identifier consumed by megatron_to_hf dispatch ("kimi_k25" in model_name).
 BRIDGE_MODEL_NAME = "kimi_k25"
 
+_CUDA_GRAPH_BS = " ".join(str(bs) for bs in [1, 2, 4, 8, *range(16, 129, 8)])
+
 
 @dataclass
 class ScriptArgs(U.ExecuteTrainConfig):
@@ -55,20 +57,22 @@ class ScriptArgs(U.ExecuteTrainConfig):
     run_id: str = U.create_run_id()
     model_org: str = "moonshotai"
     model_name: str = "Kimi-K2.5"
-    megatron_model_type: str = "kimi-k2-thinking"
-    num_gpus_per_node: int = 8
+    megatron_model_type: str = "kimi-k25"
+    num_gpus_per_node: int | None = None
     enable_eval: bool = False
     num_rollout: int = 3000
     extra_args: str = ""
     data_dir: str = "/root/datasets"
     model_dir: str = "/root/models"
     megatron_path: str = "/root/Megatron-LM"
-    hardware: Literal["H200", "H100", "B200"] = "H200"
+    hardware: Literal["auto", "H200", "H100", "B200"] = "auto"
 
     def __post_init__(self):
+        self.hardware = U.resolve_hardware(self)
+        self.num_gpus_per_node = self.num_gpus_per_node or U.NUM_GPUS_OF_HARDWARE[self.hardware]
         if self.model_name == "Kimi-K2.5":
             self.model_org = "moonshotai"
-            self.megatron_model_type = "kimi-k2-thinking"
+            self.megatron_model_type = "kimi-k25"
         elif self.model_name == "Kimi-K2.5-2layer":
             self.model_org = "CharyZeng"
             self.megatron_model_type = "kimi-k25_2layer"
@@ -198,6 +202,7 @@ def _execute_train(args: ScriptArgs):
         "--sglang-mem-fraction-static 0.7 "
         f"--sglang-ep-size {args.num_gpus_per_node} "
         "--sglang-server-concurrency 1024 "
+        f"--sglang-cuda-graph-bs {_CUDA_GRAPH_BS} "
         "--use-rollout-routing-replay "
     )
 
@@ -210,6 +215,10 @@ def _execute_train(args: ScriptArgs):
         "--attention-softmax-in-fp32 "
         "--attention-backend flash "
         "--no-check-for-nan-in-loss-and-grad "
+        # Fake QAT (INT4 env vars below) swaps in straight-through weight tensors, while
+        # TE's fused wgrad accumulation writes main_grad onto the original ones, so the two
+        # together would drop the quantized weights' gradients.
+        "--no-gradient-accumulation-fusion "
         "--colocate "
         f"--update-weight-buffer-size {4 * 512 * 1024 * 1024} "
         f"--actor-num-nodes {args.num_nodes} "

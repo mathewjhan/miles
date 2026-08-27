@@ -6,12 +6,14 @@ import base64
 import datetime
 import json
 import os
+import platform
 import random
 import shlex
 import socket
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
+from typing import get_args
 
 from miles.utils.external_utils.exec_command import exec_command_cpu, exec_command_gpu, exec_command_multi_node
 from miles.utils.external_utils.model_args_utils import shell_safe_model_args
@@ -82,6 +84,31 @@ def rsync_simple(path_src: str, path_dst: str, num_nodes: int | None = None):
     )
 
 
+def ssh_start_ray_workers(
+    master_addr: str,
+    num_gpus_per_node: int,
+    hostfile: str = "/root/mpi_rack_hostfile",
+    head_host: str | None = None,
+):
+    """Join every host in an MPI-style hostfile to the ray cluster over ssh, in parallel.
+
+    Ray itself cannot bring up the workers: the head is already running locally and the
+    workers have no agent yet. Pass this as `execute_train(before_ray_job_submit=...)` so
+    the cluster is complete before the job is submitted.
+    """
+    head_host = head_host or master_addr
+    exec_command_cpu(
+        f"for worker_ip in $(awk '{{print $1}}' {hostfile}); do "
+        f'if [ "$worker_ip" = {shlex.quote(head_host)} ]; then continue; fi; '
+        'echo "Starting Ray worker on $worker_ip"; '
+        'ssh root@"$worker_ip" '
+        '"pkill -9 sglang ; ray stop --force ; pkill -9 miles ; '
+        f"ray start --address={master_addr}:6379 --num-gpus {num_gpus_per_node} "
+        '--node-ip-address $worker_ip --disable-usage-stats" & '
+        "done; wait"
+    )
+
+
 def hf_download_dataset(full_name: str, data_dir: str = "/root/datasets"):
     _, partial_name = full_name.split("/")
     exec_command_cpu(f"hf download --repo-type dataset {full_name} --local-dir {data_dir}/{partial_name}")
@@ -107,6 +134,13 @@ class ExecuteTrainConfig:
     num_nodes: int = field(default_factory=lambda: int(os.environ.get("SLURM_JOB_NUM_NODES", "1")))
     extra_env_vars: str = ""
     output_dir: str = "/root/shared_data"
+
+
+def resolve_extra_env_vars(extra_env_vars: dict[str, str], config: ExecuteTrainConfig) -> dict[str, str]:
+    return {
+        **extra_env_vars,
+        **_parse_extra_env_vars(config.extra_env_vars),
+    }
 
 
 def execute_train(
@@ -169,7 +203,8 @@ def execute_train(
                 "CUDA_DEVICE_MAX_CONNECTIONS": "1",
             }
         ),
-        "NCCL_NVLS_ENABLE": os.environ.get("NCCL_NVLS_ENABLE", str(int(check_has_nvlink()))),
+        # a get() default is evaluated eagerly, which would probe even when already decided
+        "NCCL_NVLS_ENABLE": os.environ.get("NCCL_NVLS_ENABLE") or str(int(check_has_nvlink())),
         **{
             k: os.environ[k]
             for k in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME", "NCCL_DEBUG", "NCCL_DEBUG_FILE")
@@ -188,8 +223,7 @@ def execute_train(
             if config.cuda_core_dump
             else {}
         ),
-        **extra_env_vars,
-        **_parse_extra_env_vars(config.extra_env_vars),
+        **resolve_extra_env_vars(extra_env_vars, config),
     }
     runtime_env_vars["PYTHONPATH"] = _pythonpath_with_sources(megatron_path, runtime_env_vars.get("PYTHONPATH"))
     runtime_env_json = json.dumps({"env_vars": runtime_env_vars})
@@ -273,7 +307,7 @@ def get_env_enable_infinite_run():
 
 
 MOONCAKE_MASTER_PORT = 50051
-MOONCAKE_MASTER_METRICS_PORT = 50052
+MOONCAKE_MASTER_METRICS_PORT = 0
 MOONCAKE_MASTER_LOG_PATH = Path("/tmp/mooncake_master.log")
 
 
@@ -334,6 +368,9 @@ def encode_pseudo_file(text: str) -> str:
 
 NUM_GPUS_OF_HARDWARE = {
     "H100": 8,
+    "H200": 8,
+    "B200": 8,
+    "B300": 8,
     "GB200": 4,
     "GB300": 4,
     "MI350X": 8,
@@ -342,6 +379,44 @@ NUM_GPUS_OF_HARDWARE = {
 
 GENERATION_HARDWARE = {
     "H100": "Hopper",
+    "H200": "Hopper",
+    "B200": "Blackwell",
+    "B300": "Blackwell",
     "GB200": "Blackwell",
     "GB300": "Blackwell",
 }
+
+
+def detect_hardware() -> str:
+    """Which NUM_GPUS_OF_HARDWARE entry this node is. Call it where the answer is used: prepare steps run GPU-free."""
+    import torch
+
+    assert torch.cuda.is_available(), "no visible GPU to detect the hardware from, pass --hardware explicitly"
+    name = torch.cuda.get_device_name()
+    if torch.version.hip is not None:
+        detected = next((hardware for hardware in ("MI350X", "MI355X") if hardware in name), None)
+    else:
+        grace = platform.machine() == "aarch64"
+        match torch.cuda.get_device_capability():
+            case (9, 0):
+                detected = "H200" if torch.cuda.get_device_properties(0).total_memory > 100 * 1024**3 else "H100"
+            case (10, 0):
+                detected = "GB200" if grace else "B200"
+            case (10, 3):
+                detected = "GB300" if grace else "B300"
+            case _:
+                detected = None
+    assert detected is not None, f"cannot tell which hardware {name!r} is, pass --hardware explicitly"
+    return detected
+
+
+def resolve_hardware(config: ExecuteTrainConfig) -> str:
+    """`auto` asks the node the launcher runs on; anything explicit overrides it."""
+    if config.hardware == "auto":
+        hardware = detect_hardware()
+        print(f"detected --hardware {hardware}")
+    else:
+        hardware = config.hardware
+    supported = get_args(config.__dataclass_fields__["hardware"].type)
+    assert hardware in supported, f"{type(config).__name__} has no verified profile for {hardware}"
+    return hardware

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
@@ -25,11 +26,11 @@ class ScriptArgs(U.ExecuteTrainConfig):
     megatron_model_type: str = "deepseek-v32"
     from_bf16_ckpt: bool = False
     use_single_node: bool = False
-    num_gpus_per_node: int = 8
+    num_gpus_per_node: int | None = None
     actor_num_nodes: int | None = None
     actor_num_gpus_per_node: int | None = 8
     rollout_num_gpus: int | None = None
-    hardware: Literal["B200", "B300", "GB200", "GB300", "H100", "H200"] = "B200"
+    hardware: Literal["auto", "B200", "B300", "GB200", "GB300", "H100", "H200"] = "auto"
     enable_eval: bool = False
     extra_args: str = ""
     data_dir: str = "/root/datasets"
@@ -46,6 +47,8 @@ class ScriptArgs(U.ExecuteTrainConfig):
     tis_use_rs: bool = True
 
     def __post_init__(self):
+        self.hardware = U.resolve_hardware(self)
+        self.num_gpus_per_node = self.num_gpus_per_node or U.NUM_GPUS_OF_HARDWARE[self.hardware]
         if self.use_single_node:
             self.actor_num_nodes = 1
             self.actor_num_gpus_per_node = 4
@@ -166,7 +169,7 @@ def _prepare_cp(args: ScriptArgs, skip_existing: bool = False):
         )
 
 
-def _execute_train(args: ScriptArgs):
+def _execute_train(args: ScriptArgs, before_ray_job_submit=None):
     ref_load_path = f"{args.model_dir}/{args.model_name}_torch_dist"
     load_save_path = f"{args.output_dir}/{args.run_id}/checkpoints"
 
@@ -443,6 +446,7 @@ tis_batch_normalize: true
         megatron_model_type=args.megatron_model_type,
         extra_env_vars={**misc_env_vars},
         megatron_path=args.megatron_path,
+        before_ray_job_submit=before_ray_job_submit,
     )
 
 
@@ -454,9 +458,7 @@ def full_train(args: ScriptArgs):
     _prepare_bf16_ckpt(args)
     _prepare_mxfp8_ckpt(args)
     _prepare_fp8_ckpt(args)
-    _prepare_megatron_ckpt(args)
-    # _prepare_cp(args, skip_existing=True)
-    _execute_train(args)
+    _execute_train(args, before_ray_job_submit=partial(_prepare_megatron_ckpt, args))
 
 
 @app.command()
