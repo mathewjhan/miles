@@ -408,13 +408,6 @@ class SessionCore:
 
         response, _, assistant_message, completion_token_ids = extract_completion(result)
 
-        stored_assistant_message = {
-            "role": "assistant",
-            "content": assistant_message["content"],
-            "tool_calls": None,
-            "reasoning_content": None,
-        }
-
         # --- Phase 3: update state (lock held briefly) ---
         async with session.lock:
             if session.closing:
@@ -431,7 +424,7 @@ class SessionCore:
 
             session.update_pretokenized_state(
                 request_messages,
-                stored_assistant_message,
+                assistant_message,
                 prompt_token_ids=prompt_token_ids,
                 completion_token_ids=completion_token_ids,
                 max_trim_tokens=self.registry.tito_tokenizer.max_trim_tokens,
