@@ -289,83 +289,13 @@ stability evidence rather than a released benchmark.
 
 ## Multi-LoRA training
 
-### Current dataset-driven backend
-
-The implementation on `main` trains multiple adapters against one shared base
-model through the [fully async example](https://github.com/radixark/miles/tree/main/examples/multi_lora).
-Each registered adapter supplies its own dataset, reward, rollout batch shape,
-rank/alpha, and checkpoint directory, with most fields inheriting process-wide
-defaults. LR/WD hyperparameters come from the global CLI; each fixed slot has
-its own Adam state and independently clocked scheduler. The trainer coalesces
-ready prompt-group slices or partial adapter batches and selectively upserts
-only changed adapters into SGLang.
-
-Set the slot capacity with `--multi-lora-n-adapters N`. A bounded run registers
-repeatable `--multi-lora-adapter NAME PATH` entries at startup; service mode can
-start with empty slots and register adapters through the controller HTTP API.
-This path currently forces Megatron-Bridge LoRA and requires disaggregated NCCL
-broadcast, PP1, THD, Adam, and no train offload. Shared-outer expert adapters are
-unsupported, and MoE expert adapters cannot use FP8/FP4 experts.
-
-Native multi-LoRA is not implied by the native single-adapter work: both current
-`main` and the Tinker-oriented branch below still build multi-LoRA through
-Megatron-Bridge. Native multi-LoRA is tracked separately in
-[issue #2141](https://github.com/radixark/miles/issues/2141).
-
-### Future Tinker-compatible operation backend
-
-[PR #2273](https://github.com/radixark/miles/pull/2273) is the active
-Tinker-oriented backend proposal. It changes ownership of the training loop:
-instead of the server owning a dataset, reward function, and one-step schedule,
-clients submit explicit operations against a registered adapter. Its primary
-intended consumer is a Tinker-compatible training service rather than a generic
-server-owned dataset scheduler.
-
-```text
-Tinker-style client
-  | register + ordered operations
-  v
-controller / operation ledger
-  | bind one fixed LoRA slot
-  v
-Megatron-Bridge multi-LoRA trainer
-  | forward, backward, optimizer, checkpoint
-  | save_weights_for_sampler publish barrier
-  v
-SGLang router + registration-scoped adapter identity
-```
-
-The operation surface separates compute, optimization, and publication:
-
-| Operation | Contract |
-|---|---|
-| `forward` / `forward_backward` | Return per-datum log probabilities; backward calls accumulate client-scaled gradient sums. |
-| `optim_step` | Apply client-supplied Adam parameters and clipping to one slot, with an all-rank non-finite veto. |
-| `save_weights_for_sampler` | Publish the latest adapter and complete only after the new serving version is live. |
-| `save_state` / `load_state` | Save or restore immutable per-adapter weights and optimizer state behind shape, world-size, and ownership fences. |
-
-The design uses fixed residency rather than transparent LRU eviction. Operations
-are strictly serialized per registration, while idempotent retries, gap-buffered
-arrival, acknowledgements, and backpressure make execution retry-safe and
-order-safe. A registration-scoped serving identity prevents an old request from
-using a slot after that slot has been reassigned. Authenticated remote access is
-the responsibility of the future frontend, not the Ray operation API in #2273.
-
-The v1 scope in the PR is deliberately narrow: text-only synchronous training,
-one shared base model, shifted 1-D targets, `cross_entropy`, importance-sampling,
-and PPO losses, per-call Adam, and latest-only sampler weights. Multimodal,
-top-K/SDFT targets, CISPO/DRO, asynchronous or pinned-snapshot off-policy
-training, and cross-world-size restore are outside v1.
-
-<Warning>
-This backend is implemented in an open PR, not released on `main`; the PR
-reports H200 validation. PR #2273 provides the operation backend, but its v1
-training operations are still exposed through the controller's Ray API. The
-stacked [PR #2346](https://github.com/radixark/miles/pull/2346) adds a REST
-frontend compatible with the official `tinker==0.24.1` client; its GPU frontend
-E2E is still pending. If #2273 lands as proposed, it replaces the current
-dataset-driven driver.
-</Warning>
+The dataset-driven multi-LoRA v1 backend (fully-async driver, adapter
+controller, per-adapter data sources) has been removed. A Tinker-compatible
+multi-LoRA backend is being built in its place: clients submit explicit
+forward_backward / optim_step operations against adapter slots instead of the
+server owning datasets and schedules. The retained slot mechanics live in
+`miles/backends/megatron_utils/lora_slots.py` and
+`miles/backends/megatron_utils/multi_lora_optimizer.py`.
 
 ## Compatibility and limitations
 
@@ -403,6 +333,6 @@ dataset-driven driver.
   gathers and broadcasts adapters to remote SGLang engines.
 - `miles/rollout/session/core.py` attaches the single adapter to agentic session
   requests.
-- `miles/ray/multi_lora/`, `miles/rollout/multi_lora/`, and
-  `miles/backends/megatron_utils/multi_lora_*.py` implement the multi-adapter
-  controller, routing, scheduling, optimization, and checkpoint path.
+- `miles/backends/megatron_utils/lora_slots.py` and
+  `miles/backends/megatron_utils/multi_lora_optimizer.py` implement the
+  multi-adapter slot mechanics and per-slot optimizers.
