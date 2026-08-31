@@ -57,7 +57,7 @@ class DistBucketedWeightUpdateMixin:
             rollout engines. Only required when ``is_lora``; the
             unload-before-reload is handled by ``_update_lora_weights``.
         self._update_multi_lora_weight_implementation(named_tensors, *, lora_name, lora_config) -> None
-            Multi-LoRA variant: transfers one adapter under its per-slot engine
+            Multi-LoRA variant: transfers one adapter under an explicit engine
             name with the adapter's own config, upserting in place. Only
             required when multi-LoRA is enabled.
     """
@@ -73,8 +73,6 @@ class DistBucketedWeightUpdateMixin:
     ) -> None:
         """Initialize LoRA-specific state. Call from subclass ``__init__``."""
         self.is_lora = is_lora
-        # Set by the actor before each update_weights call (loaded map at reconcile).
-        self.multi_lora_adapters = None
         if self.is_lora:
             assert args.megatron_to_hf_mode == "bridge", (
                 "LoRA weight sync over distributed engines requires "
@@ -268,46 +266,52 @@ class DistBucketedWeightUpdateMixin:
         self._update_lora_weight_implementation(accumulated_named_tensors)
         self._lora_loaded = True
 
-    def _update_multi_lora_weights(self) -> None:
-        """Upsert the actor-selected adapters; the push set is identical on every rank so TP collectives align."""
-        adapters = self.multi_lora_adapters
-        assert adapters is not None, "actor must set multi_lora_adapters before update_weights"
-        for name in sorted(adapters):
-            self._send_one_multi_lora_adapter(adapters[name])
-
-    def _send_one_multi_lora_adapter(self, adapter) -> None:
-        """All ranks iterate the bridge (TP collectives); only the source
-        rank transmits."""
+    def push_slot(self, slot: int, lora_name: str, rank: int, alpha: float) -> None:
+        """Register one slot's adapter on the engines under ``lora_name``
+        (upsert). Every push is a new name; old versions stay until unloaded.
+        All ranks iterate the bridge (TP collectives); only the source rank
+        transmits."""
         from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
-
-        from miles.utils.multi_lora import slot_lora_name
 
         from ...lora.slots import slice_lora_to_rank
 
-        adapter_rank = adapter.config.rank
-        lora_config = build_lora_sync_config(self.args) | {"r": adapter_rank, "lora_alpha": adapter.config.alpha}
+        self._pause_and_prepare_engines()
+        dist.barrier(group=get_gloo_group())
 
+        lora_config = build_lora_sync_config(self.args) | {"r": rank, "lora_alpha": alpha}
         accumulated_named_tensors: list[tuple[str, torch.Tensor]] = []
-        with expose_adapter_slot(self.model, adapter.slot):
+        with expose_adapter_slot(self.model, slot):
             for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks({}, weight_type="lora"):
                 accumulated_named_tensors.extend(
-                    (n, slice_lora_to_rank(n, t, adapter_rank)) for n, t in hf_named_tensors if is_lora_weight_name(n)
+                    (name, slice_lora_to_rank(name, tensor, rank))
+                    for name, tensor in hf_named_tensors
+                    if is_lora_weight_name(name)
                 )
 
-        if not self._is_lora_source:
-            return
-
-        if not accumulated_named_tensors:
-            raise RuntimeError(
-                f"Multi-LoRA weight sync for adapter {adapter.name!r} yielded no lora_A/lora_B weights; "
-                "likely an incompatible Megatron-Bridge or SGLang version."
+        if self._is_lora_source:
+            if not accumulated_named_tensors:
+                raise RuntimeError(
+                    f"push_slot for {lora_name!r} yielded no lora_A/lora_B weights; "
+                    "likely an incompatible Megatron-Bridge or SGLang version."
+                )
+            self._update_multi_lora_weight_implementation(
+                accumulated_named_tensors,
+                lora_name=lora_name,
+                lora_config=lora_config,
             )
 
-        self._update_multi_lora_weight_implementation(
-            accumulated_named_tensors,
-            lora_name=slot_lora_name(adapter.slot),
-            lora_config=lora_config,
-        )
+        dist.barrier(group=get_gloo_group())
+        self._finalize_and_resume_engines()
+
+    def unload_adapter(self, lora_name: str) -> None:
+        if dist.get_rank() == 0:
+            async_utils.wait_futures(
+                [
+                    async_utils.submit(client.unload_lora_adapter(lora_name=lora_name))
+                    for client in self.rollout_engines
+                ]
+            )
+        dist.barrier(group=get_gloo_group())
 
     def _pause_and_prepare_engines(self) -> None:
         """Pause rollout engines, flush cache, and open the weight-update session."""
@@ -384,11 +388,9 @@ class DistBucketedWeightUpdateMixin:
                 dist.barrier(group=get_gloo_group())
 
             # Adapter weights: every iteration.
-            if is_lora:
-                if is_multi_lora:
-                    self._update_multi_lora_weights()
-                else:
-                    self._update_lora_weights()
+            if is_lora and not is_multi_lora:
+                # multi-LoRA adapters ship via explicit push_slot commands
+                self._update_lora_weights()
                 dist.barrier(group=get_gloo_group())
 
         with timer("finalize_and_resume_engines"):
