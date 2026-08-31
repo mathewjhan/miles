@@ -1,5 +1,5 @@
 """Multi-LoRA arg surface and engine-side slot naming. Slot mechanics live in
-``miles/backends/megatron_utils/lora_slots.py``."""
+``miles/backends/megatron_utils/lora/slots.py``."""
 
 from typing import Any
 

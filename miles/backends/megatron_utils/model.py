@@ -50,7 +50,7 @@ from .ci_utils import (
     save_model_hashes,
 )
 from .initialize import is_first_replica_megatron_main_rank
-from .lora_utils import is_lora_enabled, is_lora_model
+from .lora.utils import is_lora_enabled, is_lora_model
 from .model_provider import get_model_provider_func
 from .parallel import get_packed_seq_params
 
@@ -62,7 +62,7 @@ def _has_loadable_ckpt(load_dir: str | None) -> bool:
     return bool(load_dir) and Path(load_dir).is_dir() and any(Path(load_dir).iterdir())
 
 
-from .bridge_lora_helpers import _ensure_model_list, _setup_lora_model_via_bridge  # noqa: F401
+from .lora.bridge import _ensure_model_list, _setup_lora_model_via_bridge  # noqa: F401
 
 
 def get_optimizer_param_scheduler(args: Namespace, optimizer: MegatronOptimizer) -> OptimizerParamScheduler:
@@ -195,7 +195,7 @@ def setup_model_and_optimizer(
             layer_wise_distributed_optimizer="dist" in config.optimizer.lower(),
         )
     elif is_multi_lora_enabled(args):
-        from miles.backends.megatron_utils.multi_lora_optimizer import build_multi_lora_optimizer
+        from miles.backends.megatron_utils.lora.optimizer import build_multi_lora_optimizer
 
         optimizer = build_multi_lora_optimizer(args, config, model)
     else:
@@ -642,7 +642,7 @@ def finalize_model_grads_with_empty_cache(*args, **kwargs):
     free, total = torch.cuda.mem_get_info(device)
     if free / total < 0.1:
         clear_memory()
-    from .lora_utils import reduce_marked_lora_grads
+    from .lora.utils import reduce_marked_lora_grads
 
     reduce_marked_lora_grads(args[0])
     return finalize_model_grads(*args, **kwargs)

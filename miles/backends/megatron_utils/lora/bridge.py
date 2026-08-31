@@ -15,7 +15,7 @@ from megatron.core.utils import get_attr_wrapped_model
 from miles.utils.hf_config import load_hf_config
 from miles.utils.multi_lora import is_multi_lora_enabled
 
-from .lora_utils import patch_param_grad_buffer_for_colocate_mode_lora
+from ..lora.utils import patch_param_grad_buffer_for_colocate_mode_lora
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +117,11 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     provider.finalize()
 
     if is_multi_lora_enabled(args):
-        from miles.backends.megatron_utils.lora_slots import create_multi_lora_instance
+        from miles.backends.megatron_utils.lora.slots import create_multi_lora_instance
 
         lora = create_multi_lora_instance(args)
     else:
-        from .lora_utils import create_lora_instance
+        from .utils import create_lora_instance
 
         lora = create_lora_instance(args)
 

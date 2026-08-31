@@ -2,7 +2,7 @@ import dataclasses
 import json
 import os
 
-from miles.backends.megatron_utils.lora_utils import is_lora_weight_name
+from miles.backends.megatron_utils.lora.utils import is_lora_weight_name
 from miles.utils import megatron_bridge_utils
 
 from ..megatron_to_hf import postprocess_hf_param

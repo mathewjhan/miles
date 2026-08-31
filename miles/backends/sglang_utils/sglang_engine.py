@@ -7,7 +7,7 @@ import sys
 
 from sglang.srt.server_args import ServerArgs
 
-from miles.backends.megatron_utils.lora_utils import (
+from miles.backends.megatron_utils.lora.utils import (
     convert_target_modules_to_hf,
     lora_base_cpu_backup_enabled,
     sglang_lora_target_all_sentinel,

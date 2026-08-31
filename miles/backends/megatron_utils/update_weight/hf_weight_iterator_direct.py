@@ -174,7 +174,7 @@ def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Mo
     pp_size = get_parallel_state().pp.size
     ep_size = get_parallel_state().ep.size
 
-    from ..lora_utils import _is_adapter_param_name
+    from ..lora.utils import _is_adapter_param_name
 
     param_infos = {}
     rank = dist.get_rank()

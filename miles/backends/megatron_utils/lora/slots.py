@@ -21,7 +21,7 @@ def create_multi_lora_instance(args: Namespace):
     """Create a MultiLoRA instance from training args."""
     from megatron.bridge.peft.multi_lora import MultiLoRA
 
-    from miles.backends.megatron_utils.lora_utils import convert_target_modules_to_megatron
+    from miles.backends.megatron_utils.lora.utils import convert_target_modules_to_megatron
 
     lora_type_name = getattr(args, "lora_type", "lora").lower()
     if lora_type_name == "canonical_lora":

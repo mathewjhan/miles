@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from miles.backends.megatron_utils.lora_utils import is_lora_weight_name
+from miles.backends.megatron_utils.lora.utils import is_lora_weight_name
 from miles.backends.megatron_utils.update_weight.common import _check_weight_sync_results
 from miles.backends.megatron_utils.update_weight.update_weight_from_distributed.broadcast import (
     UpdateWeightFromDistributed,

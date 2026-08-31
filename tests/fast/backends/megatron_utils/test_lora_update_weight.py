@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from miles.backends.megatron_utils.lora_utils import is_lora_weight_name
+from miles.backends.megatron_utils.lora.utils import is_lora_weight_name
 
 # ---------------------------------------------------------------------------
 # LoRA / base weight separation (pure logic, no distributed deps)

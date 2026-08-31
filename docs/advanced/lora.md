@@ -294,8 +294,8 @@ controller, per-adapter data sources) has been removed. A Tinker-compatible
 multi-LoRA backend is being built in its place: clients submit explicit
 forward_backward / optim_step operations against adapter slots instead of the
 server owning datasets and schedules. The retained slot mechanics live in
-`miles/backends/megatron_utils/lora_slots.py` and
-`miles/backends/megatron_utils/multi_lora_optimizer.py`.
+`miles/backends/megatron_utils/lora/slots.py` and
+`miles/backends/megatron_utils/lora/optimizer.py`.
 
 ## Compatibility and limitations
 
@@ -321,9 +321,9 @@ server owning datasets and schedules. The retained slot mechanics live in
 
 ## Internals
 
-- `miles/backends/megatron_utils/bridge_lora_helpers.py` builds and wraps the
+- `miles/backends/megatron_utils/lora/bridge.py` builds and wraps the
   general Bridge LoRA model.
-- `miles/backends/megatron_utils/lora_utils.py` resolves module names, creates
+- `miles/backends/megatron_utils/lora/utils.py` resolves module names, creates
   standard/canonical adapters, and implements adapter checkpoint helpers.
 - `miles_plugins/models/inkling/lora.py` implements the native/raw LoRA path
   available on current `main`.
@@ -333,6 +333,6 @@ server owning datasets and schedules. The retained slot mechanics live in
   gathers and broadcasts adapters to remote SGLang engines.
 - `miles/rollout/session/core.py` attaches the single adapter to agentic session
   requests.
-- `miles/backends/megatron_utils/lora_slots.py` and
-  `miles/backends/megatron_utils/multi_lora_optimizer.py` implement the
+- `miles/backends/megatron_utils/lora/slots.py` and
+  `miles/backends/megatron_utils/lora/optimizer.py` implement the
   multi-adapter slot mechanics and per-slot optimizers.

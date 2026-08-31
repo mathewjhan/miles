@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.distributed as dist
 
-from miles.backends.megatron_utils.lora_utils import (
+from miles.backends.megatron_utils.lora.utils import (
     build_lora_sync_config,
     is_lora_weight_name,
     lora_base_cpu_backup_enabled,

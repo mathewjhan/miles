@@ -12,7 +12,7 @@ from megatron.training.global_vars import get_args
 
 from miles.utils import megatron_bridge_utils
 
-from .lora_utils import is_lora_enabled, is_lora_model, load_lora_adapter, save_lora_checkpoint
+from .lora.utils import is_lora_enabled, is_lora_model, load_lora_adapter, save_lora_checkpoint
 
 try:
     # Here we patch out the `validate_non_overlapping_shards_metadata` in both functions
