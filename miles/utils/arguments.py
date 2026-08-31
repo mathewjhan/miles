@@ -1802,6 +1802,24 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "PR #21466's experts_shared_outer_loras=True serving contract.",
             )
             parser.add_argument(
+                "--tinker-server-port",
+                type=int,
+                default=10613,
+                help="Port for the Tinker gateway HTTP server (default: 10613)",
+            )
+            parser.add_argument(
+                "--tinker-base-model",
+                type=str,
+                default=None,
+                help="Model name the gateway advertises and validates against (default: --hf-checkpoint)",
+            )
+            parser.add_argument(
+                "--tinker-checkpoint-root",
+                type=str,
+                default=None,
+                help="Directory for tinker:// checkpoints (default: <save>/tinker)",
+            )
+            parser.add_argument(
                 "--multi-lora-n-adapters",
                 type=int,
                 default=0,
