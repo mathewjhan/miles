@@ -426,10 +426,6 @@ def train_one_step(
     Runs forward/backward over ``num_microbatches``, applies optimizer step and
     one scheduler step when gradients are valid.
 
-    Multi-LoRA: gradients are retained across train calls (per-adapter
-    gradient accumulation); only the slots in the batch's ``step_slots`` step,
-    and only their gradients are zeroed.
-
     Args:
         args: Runtime arguments.
         rollout_id: Rollout identifier.
@@ -448,16 +444,7 @@ def train_one_step(
     parallel_state = get_parallel_state()
     dumper_phase_util = DumperMegatronUtil(args, model, DumperPhase.FWD_BWD, rollout_id=rollout_id)
     disable_optimizer = args.debug_disable_optimizer or optimizer is None
-    multi_lora = is_multi_lora_enabled(args)
-
-    if multi_lora:
-        from miles.backends.megatron_utils.multi_lora_optimizer import reset_grad_metadata_keep_grads
-
-        # Retain accumulated per-adapter gradients; reset only the per-iteration
-        # DDP bookkeeping. Slot grads are zeroed selectively at step time.
-        reset_grad_metadata_keep_grads(model)
-    else:
-        _zero_grads(model, optimizer, disable_optimizer)
+    _zero_grads(model, optimizer, disable_optimizer)
 
     if args.custom_megatron_before_train_step_hook_path:
         from miles.utils.function_registry import load_function
@@ -590,7 +577,7 @@ def train_one_step(
             outcome = TrainStepOutcome.DISCARDED_SHOULD_RETRY
             valid_step = False
 
-    if (not disable_optimizer) and (not multi_lora) and (not getattr(args, "check_for_nan_in_loss_and_grad", True)):
+    if (not disable_optimizer) and (not getattr(args, "check_for_nan_in_loss_and_grad", True)):
         found_inf_flag = optimizer.prepare_grads()
         if found_inf_flag:
             valid_step = False
@@ -615,24 +602,11 @@ def train_one_step(
         dumper_phase_util.finalize(model)
 
     if not disable_optimizer and valid_step:
-        if multi_lora:
-            from miles.backends.megatron_utils.multi_lora_utils import step_stepped_adapter_slots
+        update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+        assert update_successful
+        opt_param_scheduler.step(increment=num_rollouts)
 
-            grad_norm = step_stepped_adapter_slots(
-                args, model, optimizer, data_iterator[0].rollout_data, rollout_id, step_id
-            )
-        else:
-            # Update parameters.
-            update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
-
-            # Update learning rate.
-            assert update_successful
-            opt_param_scheduler.step(increment=num_rollouts)
-
-    # release grad (multi-LoRA retains accumulated grads; stepped slots were
-    # zeroed selectively inside step_adapter_slots)
-    if not multi_lora:
-        _zero_grads(model, optimizer, disable_optimizer)
+    _zero_grads(model, optimizer, disable_optimizer)
 
     log_structured(
         logger.info,
