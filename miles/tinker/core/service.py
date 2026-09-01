@@ -13,7 +13,7 @@ import time
 import uuid
 
 from miles.tinker.core.planner import BarrierUnit, Planner, WorkUnit
-from miles.tinker.core.promise import Promise, PromiseStore
+from miles.tinker.core.promise import PENDING, Promise, PromiseStore
 from miles.tinker.core.stream import ModelStream
 from miles.tinker.core.types import Command, GatewayConfig, ModelRecord, OwnershipError, UserInputError
 
@@ -279,8 +279,10 @@ class TinkerService:
             stream = self.planner.stream(model_id)
             self.planner.remove_stream(model_id)
             del self.models[model_id]
-            for pending in stream.queue:
-                self.promises.fail(stream.request_id_by_seq[pending.command.seq_id], "lease expired", "user")
+            for request_id in stream.request_id_by_seq.values():
+                promise = self.promises.get(request_id, record.tenant)
+                if promise is not None and promise.state == PENDING:
+                    self.promises.fail(request_id, "lease expired", "user")
             async with self._backend_lock:
                 await self.backend.unload_slot(record.slot)
             self.free_slots.add(record.slot)
