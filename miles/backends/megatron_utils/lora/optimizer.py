@@ -82,7 +82,7 @@ def build_multi_lora_optimizer(
 
     pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
-    # Defer bf16 master-weight creation into LayerWise (post-sharding) so fp32 masters exist only for owned params.
+    # bf16 off: builder must yield unwrapped torch optimizers; LayerWise wraps post-sharding
     reset_bf16 = config.bf16
     config.bf16 = False
 
@@ -109,7 +109,8 @@ def build_multi_lora_optimizer(
             for child in children:
                 for group in child.param_groups:
                     group["miles_multi_lora_slot"] = slot
-                base_optimizers.append(child)
+                # LayerWise's Float16 wrap reuses these group dicts, so the slot tag survives
+                base_optimizers.append(child.optimizer)
                 init_fns.append(_adam_init_state_fn)
     finally:
         config.bf16 = reset_bf16
