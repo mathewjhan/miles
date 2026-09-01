@@ -178,7 +178,7 @@ def step_adapter_slots(
         grads_for_norm = []
         slot_params = []
         for child in children:
-            grads_for_norm += child.get_main_grads_for_grad_norm()
+            grads_for_norm += child.get_grads_for_grad_norm()
             slot_params += child.get_parameters()
         slot_norm = get_grad_norm_fp32(grads_for_norm, grad_stats_parallel_group=None)
         if clip_grad > 0.0 and slot_params:
