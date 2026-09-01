@@ -63,7 +63,6 @@ def forward_backward(
 
 
 def optim_step(
-    args: Namespace,
     model: Sequence[DDP],
     optimizer: MegatronOptimizer,
     adam_params_by_slot: dict[int, dict],
