@@ -360,6 +360,7 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "weight_versions",
             "adapter_slots",
             "loss_weights",
+            "advantages",
         ]:
             if key not in data:
                 continue
