@@ -13,6 +13,7 @@ from miles.tinker.server.app import build_app
 from miles.utils import object_store
 from miles.utils.arguments import parse_args
 from miles.utils.audit_utils.process_identity import MainProcessIdentity
+from miles.utils.http_utils import init_http_client
 from miles.utils.logging_utils import configure_logger
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 async def serve(args):
     assert args.multi_lora, "serve_tinker requires --multi-lora-n-adapters > 0"
     configure_logger(args, source=MainProcessIdentity())
+
+    # no RolloutExecutor here; the gateway posts /generate itself
+    init_http_client(args)
 
     _worker_manager = launch_worker_manager(args)
     object_store.init_instance(args, contribute_segment=False)
