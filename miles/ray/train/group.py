@@ -388,6 +388,7 @@ class TrainerController:
 
     async def _execute_slots(self, fn_name: str, **kwargs) -> list:
         results = await asyncio.gather(*[cell.execute(fn_name, **kwargs) for cell in self._cells])
+        # one trainer cell; its result is the per-actor list
         return results[0]
 
     async def forward_backward(self, unit_id: int, data_ref) -> list:

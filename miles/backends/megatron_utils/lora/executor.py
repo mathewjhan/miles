@@ -65,8 +65,7 @@ def optim_step(
 ) -> dict[int, float]:
     for slot, adam_params in adam_params_by_slot.items():
         _apply_adam_params(optimizer, slot, adam_params)
-    # batch size 1: grads step exactly as accumulated, normalization is the
-    # client's business via loss weights
+    # batch size 1: grads step as accumulated; normalization is the client's loss weights
     return step_adapter_slots(
         optimizer,
         model,
@@ -76,8 +75,7 @@ def optim_step(
 
 
 def _apply_adam_params(optimizer: MegatronOptimizer, slot: int, adam_params: dict) -> None:
-    # AdamParams arrives fully materialized from the gateway encoder; a
-    # missing key is an encoder bug, not a default to paper over
+    # AdamParams is materialized at the boundary; a missing key is an encoder bug
     for child in _slot_children(optimizer, slot):
         for group in child.param_groups:
             group["lr"] = adam_params["learning_rate"]
