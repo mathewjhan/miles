@@ -83,8 +83,7 @@ class TinkerService:
             session["last_heartbeat"] = time.monotonic()
 
     def create_model(self, tenant: str, payload: dict) -> tuple[str, str]:
-        """Allocate a slot and answer with a promise (create_model is two-phase
-        like every training command); slot initialization runs behind it."""
+        """Two-phase like every command: allocate now, initialize the slot behind the promise."""
         base_model = payload["base_model"]
         if base_model != self.config.base_model:
             raise UserInputError(f"this gateway serves {self.config.base_model!r}, not {base_model!r}")
@@ -254,8 +253,8 @@ class TinkerService:
         return f"{model_id}@{name}"
 
     async def sweep_leases(self) -> None:
-        """Kill in-flight sampling of tenants whose every session went stale;
-        training state stays (recoverable only from explicit checkpoints)."""
+        """Reclaim from stale tenants: cancel sampling, unload models, free
+        slots. Training state dies with the lease; only checkpoints survive."""
         while True:
             await asyncio.sleep(30)
             now = time.monotonic()
@@ -268,6 +267,18 @@ class TinkerService:
                 if self.sessions and tenant not in fresh_tenants:
                     logger.warning(f"lease expired for tenant of sample {request_id}; cancelling")
                     task.cancel()
+            for model_id, record in list(self.models.items()):
+                if not self.sessions or record.tenant in fresh_tenants:
+                    continue
+                logger.warning(f"lease expired for {model_id}; freeing slot {record.slot}")
+                stream = self.planner.stream(model_id)
+                self.planner.remove_stream(model_id)
+                del self.models[model_id]
+                for pending in stream.queue:
+                    self.promises.fail(stream.request_id_by_seq[pending.command.seq_id], "lease expired", "user")
+                async with self._backend_lock:
+                    await self.backend.unload_slot(record.slot)
+                self.free_slots.add(record.slot)
 
     # -------- dispatch loop --------
 
