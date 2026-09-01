@@ -38,10 +38,12 @@ async def serve(args):
     )
     await trainer.init()
 
+    checkpoint_root = args.tinker_checkpoint_root or (args.save and f"{args.save}/tinker")
+    assert checkpoint_root, "set --tinker-checkpoint-root (or --save to derive <save>/tinker)"
     config = GatewayConfig(
         base_model=args.tinker_base_model or args.hf_checkpoint,
         n_slots=args.multi_lora_n_adapters,
-        checkpoint_root=args.tinker_checkpoint_root or f"{args.save}/tinker",
+        checkpoint_root=checkpoint_root,
         lora_alpha=args.lora_alpha,
     )
     router_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
@@ -55,7 +57,7 @@ async def serve(args):
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    args = parse_args(entry="serve")
     # commands ship one work unit at a time; its size is the batch size
     args.use_dynamic_global_batch_size = True
     args.delay_split_train_data_by_dp = True
