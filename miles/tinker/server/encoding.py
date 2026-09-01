@@ -147,6 +147,8 @@ def render_result(result: dict) -> dict:
             if result.get(key) is not None:
                 rendered[key] = result[key]
         return rendered
+    if kind == "create_model":
+        return {"type": "create_model", "model_id": result["model_id"]}
     if kind == "save_state":
         return {"type": "save_weights", "path": result["path"]}
     if kind == "save_weights_for_sampler":

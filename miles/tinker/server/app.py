@@ -87,8 +87,8 @@ def build_app(service: TinkerService) -> FastAPI:
     @app.post("/api/v1/create_model")
     async def create_model(request: Request, authorization: str | None = Header(default=None)):
         payload = await request.json()
-        model_id = await service.create_model(_tenant(authorization), payload)
-        return {"type": "create_model", "model_id": model_id}
+        request_id, model_id = service.create_model(_tenant(authorization), payload)
+        return {"request_id": request_id, "model_id": model_id}
 
     @app.post("/api/v1/get_info")
     async def get_info(request: Request, authorization: str | None = Header(default=None)):

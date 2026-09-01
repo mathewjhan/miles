@@ -66,6 +66,7 @@ class TinkerService:
         self._wake = asyncio.Event()
         self._backend_lock = asyncio.Lock()
         self._sample_tasks: dict[str, tuple] = {}  # request_id -> (task, tenant)
+        self._create_tasks: set = set()
         self._arrival_counter = 0
         self._unit_counter = 0
 
@@ -81,7 +82,9 @@ class TinkerService:
         if session is not None:
             session["last_heartbeat"] = time.monotonic()
 
-    async def create_model(self, tenant: str, payload: dict) -> str:
+    def create_model(self, tenant: str, payload: dict) -> tuple[str, str]:
+        """Allocate a slot and answer with a promise (create_model is two-phase
+        like every training command); slot initialization runs behind it."""
         base_model = payload["base_model"]
         if base_model != self.config.base_model:
             raise UserInputError(f"this gateway serves {self.config.base_model!r}, not {base_model!r}")
@@ -104,11 +107,25 @@ class TinkerService:
             session_id=payload.get("session_id", ""),
             user_metadata=payload.get("user_metadata") or {},
         )
-        async with self._backend_lock:
-            await self.backend.load_slot(slot, rank, alpha)
         self.models[model_id] = record
         self.planner.add_stream(ModelStream(model_id, tenant, slot))
-        return model_id
+        promise = self.promises.create(model_id, tenant)
+        task = asyncio.create_task(self._run_create_model(promise.request_id, record))
+        self._create_tasks.add(task)
+        task.add_done_callback(self._create_tasks.discard)
+        return promise.request_id, model_id
+
+    async def _run_create_model(self, request_id: str, record: ModelRecord) -> None:
+        try:
+            async with self._backend_lock:
+                await self.backend.load_slot(record.slot, record.lora_rank, record.lora_alpha)
+        except Exception as error:
+            self.models.pop(record.model_id, None)
+            self.planner.remove_stream(record.model_id)
+            self.free_slots.add(record.slot)
+            self.promises.fail(request_id, str(error), "internal")
+            return
+        self.promises.resolve(request_id, {"kind": "create_model", "model_id": record.model_id})
 
     def get_model(self, tenant: str, model_id: str) -> ModelRecord:
         record = self.models.get(model_id)
