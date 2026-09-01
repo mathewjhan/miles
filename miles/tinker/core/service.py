@@ -24,7 +24,9 @@ class ExecutorBackend:
     """What runtime.py implements. Speaks rows and plain lists; core stays
     torch-free and miles-free."""
 
-    async def load_slot(self, slot: int, rank: int, alpha: float, ckpt_path: str | None = None) -> None:
+    async def load_slot(
+        self, slot: int, rank: int, alpha: float, ckpt_path: str | None = None, load_optimizer: bool = True
+    ) -> None:
         raise NotImplementedError
 
     async def unload_slot(self, slot: int) -> None:
@@ -378,6 +380,7 @@ class TinkerService:
                 record.lora_rank,
                 record.lora_alpha,
                 ckpt_path=self._checkpoint_dir(source_id, kind, name),
+                load_optimizer=payload["optimizer"],
             )
             return [{"kind": "load_state"}]
         if unit.kind == "save_weights_for_sampler":
