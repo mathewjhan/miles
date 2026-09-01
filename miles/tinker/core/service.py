@@ -157,7 +157,9 @@ class TinkerService:
             self._admit(kind, payload)
         except UserInputError as error:
             self.promises.fail(promise.request_id, str(error), "user")
-            return promise.request_id
+            # the rejected command still consumes its seq position, or the
+            # stream would wait for it forever
+            payload = {**payload, "rows": []}
 
         self._arrival_counter += 1
         stream.submit(

@@ -57,6 +57,8 @@ class ModelStream:
                 pending.rows = next_command.payload["rows"]
                 pending.remaining = len(pending.rows)
                 pending.outputs = [None] * len(pending.rows)
+                if not pending.rows:
+                    continue  # admission-rejected: the position is consumed, nothing runs
             self.queue.append(pending)
 
     def open_window(self) -> list[PendingRequest]:
