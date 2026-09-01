@@ -155,7 +155,7 @@ def render_result(result: dict) -> dict:
     if kind == "load_state":
         return {"type": "load_weights"}
     if kind == "optim_step":
-        return {"type": "optim_step"}
+        return {"type": "optim_step", "metrics": result["metrics"]}
     raise AssertionError(f"unrenderable result kind {kind!r}")
 
 

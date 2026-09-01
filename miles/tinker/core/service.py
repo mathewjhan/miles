@@ -353,10 +353,13 @@ class TinkerService:
 
     async def _execute_barrier(self, unit: BarrierUnit) -> list[dict]:
         if unit.kind == "optim_step":
-            await self.backend.optim_step(
+            grad_norms = await self.backend.optim_step(
                 {stream.slot: pending.command.payload["adam_params"] for stream, pending in unit.entries}
             )
-            return [{"kind": "optim_step"} for _ in unit.entries]
+            return [
+                {"kind": "optim_step", "metrics": {"grad_norm": float(grad_norms[stream.slot])}}
+                for stream, _ in unit.entries
+            ]
 
         ((stream, pending),) = unit.entries
         record = self.models[stream.model_id]
