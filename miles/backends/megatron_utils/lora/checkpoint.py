@@ -101,6 +101,7 @@ def _optimizer_slot_state(optimizer: MegatronOptimizer, slot: int) -> dict:
             group_steps.append(step.cpu() if torch.is_tensor(step) else step)
         params = []
         for main_param in child.get_parameters():
+            # a never-stepped slot has no per-param state yet
             state = inner.state[main_param] if main_param in inner.state else {}
             params.append({key: value.cpu() if torch.is_tensor(value) else value for key, value in state.items()})
         children_states.append({"group_steps": group_steps, "params": params})
@@ -116,6 +117,7 @@ def _load_optimizer_slot_state(optimizer: MegatronOptimizer, slot: int, saved: d
     assert len(children) == len(saved["children"]), "optimizer layout changed since save"
     for child, child_state in zip(children, saved["children"], strict=True):
         inner = child.optimizer
+        # FusedAdam clocks steps on the param group, not in per-param state
         for group, step in zip(inner.param_groups, child_state["group_steps"], strict=True):
             existing = group.get("step")
             if torch.is_tensor(existing):
