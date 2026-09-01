@@ -164,6 +164,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--clear-quantized-weight-workspaces-on-offload",
+                action=argparse.BooleanOptionalAction,
+                default=True,
+                help=(
+                    "Drop TransformerEngine's cached quantized weights before offloading the "
+                    "training actor. They are rebuilt on the next forward, so backing them up "
+                    "to pinned host memory is pure overhead. Ignored when TransformerEngine "
+                    "is not in use or CUDA graphs are enabled."
+                ),
+            )
+            parser.add_argument(
                 "--offload-rollout",
                 action=argparse.BooleanOptionalAction,
                 help=(
@@ -199,14 +210,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--stream-optimizer-state-to-disk",
                 action="store_true",
                 help=(
-                    "Stream the fp32 main params and Adam moments through per-bucket files on "
-                    "node-local NVMe during optimizer.step(), bounding GPU residency to one bucket. "
-                    "For when the optimizer state does not fit the GPU *while the step runs*: "
-                    "--offload-train-target=disk cannot help there, because pause/resume happen at "
-                    "phase boundaries and everything is resident again by the time Adam launches. "
-                    "Bit-identical to keeping the state on GPU, at the cost of disk traffic every "
-                    "step. Distinct from --offload-optimizer-states and --optimizer-cpu-offload, "
-                    "and mutually exclusive with both."
+                    "Hold optimizer state in files on node-local NVMe, for when it does not fit the "
+                    "GPU *while the step runs*; --offload-train-target=disk cannot help there.\n"
+                    "adam: streams fp32 main params and moments through per-bucket files, one bucket "
+                    "resident at a time. Requires the distributed optimizer, excludes "
+                    "--offload-optimizer-states and --optimizer-cpu-offload.\n"
+                    "dist_muon: the disk backend for --chunked-optimizer-state-offload, so pass that "
+                    "plus a non-zero --optimizer-state-offload-fraction. --optimizer-cpu-offload is "
+                    "Adam-only. This bounds host residency, not the GPU restore window -- for that "
+                    "set --optimizer-state-offload-chunk-size-mb, which Megatron warns about at 0."
                 ),
             )
             parser.add_argument(
@@ -238,7 +250,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "its own subdirectory). Should be fast local NVMe (e.g. /scratch); a tmpfs "
                     "mount, which /tmp is on many systems, keeps the data in RAM and defeats both. "
                     "Files are per-process and overwritten in place every step (bounded size); "
-                    "defaults to $SCRATCH/miles_train_offload_<uid>."
+                    "defaults to $SCRATCH/miles_train_offload_<uid>. Muon's optimizer-state buffers "
+                    "are unlinked once mapped, so their footprint shows in df but not du."
                 ),
             )
             parser.add_argument(
@@ -835,10 +848,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument(
                 "--update-weight-transfer-mode",
-                choices=["broadcast", "p2p", "disk-delta"],
+                choices=["broadcast", "p2p", "disk-delta", "rdt"],
                 default="broadcast",
                 help=(
                     "The method to transfer weights to remote rollout engines during update weight. "
+                    "'broadcast' = NCCL broadcast; 'p2p' = mooncake RDMA write; "
+                    "'rdt' = Ray Direct Transport (NIXL RDMA pull, requires sglang use_ray=True). "
                     "'disk-delta' diffs each sync against a CPU snapshot of the previous one and publishes "
                     "only the changed bytes to --update-weight-disk-dir; each engine's /pull_weights applies "
                     "them into a host-local checkpoint that the engine reloads from."
@@ -2424,7 +2439,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             Add custom Megatron plugins arguments.
             This is a placeholder for any additional arguments that might be needed.
             """
-            # Custom arguments can be added here
+            from miles_plugins.models.deepseek_v4.arguments import add_dsv4_arguments
+
+            add_dsv4_arguments(parser)
             parser.add_argument(
                 "--freeze-indexer",
                 action="store_true",
@@ -2538,11 +2555,14 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--session-server-port",
                 type=int,
-                nargs="+",
                 default=None,
-                help="Port(s) of the standalone session servers. One value: a single server on "
-                "that port. Two values: a half-open range [start, end), one server per port. "
-                "Auto-allocates a single port if not set.",
+                help="First port for standalone session servers. When unset, each worker port is auto-allocated.",
+            )
+            parser.add_argument(
+                "--session-server-workers",
+                type=int,
+                default=32,
+                help="Number of standalone session servers to launch. An explicit start uses consecutive ports.",
             )
             parser.add_argument(
                 "--tito-model",
@@ -3042,7 +3062,7 @@ def miles_validate_args(args):
             or not os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
         ):
             args.load = args.ref_load or args.hf_checkpoint
-        args.start_rollout_id = 0
+            args.start_rollout_id = 0
     else:
         if (
             args.load is None
@@ -3260,14 +3280,22 @@ def miles_validate_args(args):
         args.check_weight_update_equal = True
 
     # always true on offload for colocate at the moment.
-    if args.update_weight_transfer_mode == "p2p":
+    if args.update_weight_transfer_mode == "rdt":
+        assert args.train_backend == "megatron", "RDT weight transfer is only supported with --train-backend megatron."
+        assert not args.use_critic, (
+            "RDT weight transfer is not compatible with Shared Actor/Critic PPO: "
+            "RDT requires each trainer rank to reserve a full GPU, but PPO schedules "
+            "actor and critic ranks in the same GPU bundles."
+        )
+
+    if args.update_weight_transfer_mode in ("p2p", "rdt"):
         assert not args.colocate, (
-            "P2P weight transfer mode is not compatible with --colocate. "
-            "Please use broadcast mode or disable colocate."
+            f"{args.update_weight_transfer_mode} weight transfer mode is not compatible with "
+            "--colocate. Please use broadcast mode or disable colocate."
         )
         assert (
             getattr(args, "prefill_num_servers", None) is None
-        ), "P2P weight transfer mode has not been tested when PD is enabled."
+        ), f"{args.update_weight_transfer_mode} weight transfer mode has not been tested when PD is enabled."
         assert args.lora_rank <= 0, "LoRA weight sync is not supported for p2p (RDMA) weight transfer."
 
     if args.update_weight_transfer_mode == "disk-delta":
@@ -3365,10 +3393,26 @@ def miles_validate_args(args):
             "process group, so torch.distributed.get_rank() restarts at 0 per cell and two cells "
             "on one node would share a store directory"
         )
-        assert args.use_distributed_optimizer, "--stream-optimizer-state-to-disk requires the distributed optimizer"
-        assert (
-            args.optimizer == "adam"
-        ), f"--stream-optimizer-state-to-disk requires --optimizer adam, got {args.optimizer}"
+        _muon_disk_state = "muon" in (args.optimizer or "").lower()
+        if _muon_disk_state:
+            # Megatron's validate_args has not run yet, so gate on the dist_ prefix rather than
+            # use_layer_wise_distributed_optimizer.
+            assert args.optimizer.lower().startswith("dist_"), (
+                "--stream-optimizer-state-to-disk with Muon requires the layer-wise distributed "
+                f"optimizer; pass --optimizer dist_muon, got {args.optimizer}"
+            )
+            assert args.chunked_optimizer_state_offload and args.optimizer_state_offload_fraction > 0.0, (
+                "--stream-optimizer-state-to-disk with Muon is the disk backend for the chunked "
+                "offloader; pass --chunked-optimizer-state-offload and a non-zero "
+                "--optimizer-state-offload-fraction"
+            )
+        else:
+            assert (
+                args.use_distributed_optimizer
+            ), "--stream-optimizer-state-to-disk requires the distributed optimizer"
+            assert (
+                args.optimizer == "adam"
+            ), f"--stream-optimizer-state-to-disk requires --optimizer adam, got {args.optimizer}"
         assert not (args.multi_lora or is_lora_enabled(args)), (
             "--stream-optimizer-state-to-disk does not support LoRA: the LoRA checkpoint path "
             "persists optimizer.state_dict(), which the store leaves empty, and restores the "
@@ -3376,7 +3420,7 @@ def miles_validate_args(args):
         )
         assert not args.optimizer_cpu_offload, "--stream-optimizer-state-to-disk excludes --optimizer-cpu-offload"
         assert (
-            not args.offload_optimizer_states
+            _muon_disk_state or not args.offload_optimizer_states
         ), "--stream-optimizer-state-to-disk excludes --offload-optimizer-states"
         assert (
             not args.use_precision_aware_optimizer

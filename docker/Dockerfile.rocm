@@ -30,7 +30,7 @@ ARG GPU_ARCH=gfx950
 ARG APPLY_ROCR_VMMFIX=0
 ARG SGLANG_USE_ROCM700A=0
 ARG WHEELS_REPO=XinyuJiangCMU/miles-wheels-rocm
-ARG WHEELS_TAG_ROCM=rocm720-gfx950-v0.5.14
+ARG WHEELS_TAG_ROCM=rocm720-gfx950-v0.5.16
 ARG MAX_JOBS=128
 
 ARG RCCL_TESTS_REPO=https://github.com/ROCm/rocm-systems.git
@@ -63,7 +63,6 @@ ENV CMAKE_PREFIX_PATH=/opt/rocm:/opt/rocm/hip:/usr/local:/usr
 
 # Patches + requirements consumed below.
 # TODO: remove these patches once the changes are merged into the main codebase.
-COPY docker/amd_patch/latest/megatron.patch /tmp/amd_patch/megatron.patch
 COPY docker/amd_patch/latest/tile_kernels.patch /tmp/amd_patch/tile_kernels.patch
 COPY docker/amd_patch/latest/tilelang_hip_fp8.patch /tmp/amd_patch/tilelang_hip_fp8.patch
 COPY requirements.txt /tmp/requirements.txt
@@ -107,7 +106,7 @@ RUN pip install --no-deps --target=/tmp/mc "mooncake-transfer-engine-non-cuda==$
     cp -n /tmp/mc/mooncake/*.py "$(python3 -c 'import mooncake, os; print(os.path.dirname(mooncake.__file__))')" && \
     rm -rf /tmp/mc
 
-RUN pip install flash-linear-attention==0.4.2
+RUN pip install flash-linear-attention==0.5.2
 
 # Enable deepseek-ai/TileKernels on ROCm/gfx950 for mHC and FP8 QAT cast-back.
 # These temporary build-time patches make tile_kernels import lazy, remove CUDA/Hopper-only PDL from mhc_post,
@@ -120,7 +119,6 @@ RUN pip install --no-deps tile_kernels==1.0.0 && \
 RUN rm -rf /root/Megatron-LM && \
     git clone --recursive -b ${MEGATRON_BRANCH} https://github.com/${MEGATRON_REPO}.git /root/Megatron-LM && \
     cd /root/Megatron-LM && \
-    git apply /tmp/amd_patch/megatron.patch && \
     pip install -e .
 
 RUN cd /sgl-workspace/sglang && \
@@ -133,9 +131,12 @@ RUN cd /sgl-workspace/sglang && \
     fi && \
     pip install -e "python[all_hip]" --no-deps
 
+# SGLang is installed without dependencies, but its Inkling multimodal processor imports numba.
+RUN pip install "numba==0.65.1"
+
 RUN python -c "import sglang; import sgl_kernel; print('SGLang + sgl_kernel: OK')"
 
-RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@74d68c5e4bedf2b6774f2c92ed0f81b7c8d91ed0 --no-cache-dir --force-reinstall
+RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@f05a8754daf68238d54e4cf31cb3ba866684bbaf --no-cache-dir --force-reinstall
 
 # Fix the ROCm 7.2 ROCr VMM-pause leak.
 RUN if [ "$APPLY_ROCR_VMMFIX" = "1" ]; then \

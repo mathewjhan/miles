@@ -286,6 +286,43 @@ def test_dynamic_global_batch_size_requires_dynamic_batch_size():
         miles_validate_args(args)
 
 
+class TestRdtValidation:
+    def _validate(self, extra):
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+        args = parser.parse_args(
+            ["--update-weight-transfer-mode", "rdt", *extra, "--num-rollout", "1"] + REQUIRED_ARGS
+        )
+        miles_validate_args(args)
+        return args
+
+    def test_accepts_megatron_without_critic(self):
+        args = self._validate(["--train-backend", "megatron", "--advantage-estimator", "grpo"])
+
+        assert args.use_critic is False
+
+    @pytest.mark.parametrize(
+        ("extra", "message"),
+        [
+            pytest.param(
+                ["--train-backend", "fsdp", "--advantage-estimator", "grpo"],
+                "only supported with --train-backend megatron",
+                id="fsdp",
+            ),
+            pytest.param(
+                ["--train-backend", "megatron", "--advantage-estimator", "ppo"],
+                "not compatible with Shared Actor/Critic PPO",
+                id="ppo",
+            ),
+        ],
+    )
+    def test_rejects_unsupported_configuration(self, monkeypatch, extra, message):
+        monkeypatch.delenv("MILES_EXPERIMENTAL_FT_TRAINER", raising=False)
+
+        with pytest.raises(AssertionError, match=message):
+            self._validate(extra)
+
+
 class TestCriticSaveDerivation:
     def _validate(self, extra):
         parser = argparse.ArgumentParser()
@@ -337,6 +374,29 @@ class TestSessionServerV2Validation:
             miles_validate_args(args)
 
         assert str(exc_info.value) == (f"--use-session-server v2 does not support {flag}; v2 returns list[Sample]")
+
+
+class TestSessionServerScalingArguments:
+    def _parse(self, extra):
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+        return parser.parse_args(extra + ["--num-rollout", "1"] + REQUIRED_ARGS)
+
+    def test_defaults_to_32_workers_and_an_auto_port(self):
+        args = self._parse([])
+
+        assert args.session_server_port is None
+        assert args.session_server_workers == 32
+
+    def test_parses_starting_port_and_worker_count(self):
+        args = self._parse(["--session-server-port", "30000", "--session-server-workers", "4"])
+
+        assert args.session_server_port == 30000
+        assert args.session_server_workers == 4
+
+    def test_rejects_the_removed_end_port_form(self):
+        with pytest.raises(SystemExit):
+            self._parse(["--session-server-port", "30000", "30004"])
 
 
 class TestSessionMessageMatcherArgument:
@@ -426,6 +486,23 @@ class TestTitoFixedTemplateConfiguration:
         miles_validate_args(args)
         assert args.chat_template_path.endswith("/qwen3_fixed.jinja")
         assert args.apply_chat_template_kwargs == {"clear_thinking": False}
+
+    @pytest.mark.parametrize(
+        ("family", "template"),
+        [("qwen35", "qwen3.5_fixed.jinja"), ("qwen36", "qwen3.6_fixed.jinja")],
+    )
+    def test_qwen35_and_qwen36_resolve_family_template(self, family, template):
+        args = self._parse(["--use-session-server", "--tito-model", family])
+        miles_validate_args(args)
+        assert args.chat_template_path.endswith(f"/{template}")
+        assert args.apply_chat_template_kwargs == {"preserve_thinking": True}
+
+    @pytest.mark.parametrize("family", ["qwen38small", "qwen4exp"])
+    def test_qwen38_families_resolve_default_template(self, family):
+        args = self._parse(["--use-session-server", "--tito-model", family])
+        miles_validate_args(args)
+        assert args.chat_template_path.endswith("/qwen3.8_small_and_flash_next_fixed.jinja")
+        assert args.apply_chat_template_kwargs == {"preserve_thinking": True, "reasoning_effort": "xhigh"}
 
     def test_named_family_rejects_custom_template(self):
         args = self._parse(
