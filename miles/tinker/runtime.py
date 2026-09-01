@@ -27,8 +27,10 @@ class MilesBackend(ExecutorBackend):
         self.trainer = trainer
         self.router_url = router_url
 
-    async def load_slot(self, slot: int, rank: int, alpha: float, ckpt_path: str | None = None) -> None:
-        await self.trainer.load_slot(slot, rank, alpha, ckpt_path=ckpt_path)
+    async def load_slot(
+        self, slot: int, rank: int, alpha: float, ckpt_path: str | None = None, load_optimizer: bool = True
+    ) -> None:
+        await self.trainer.load_slot(slot, rank, alpha, ckpt_path=ckpt_path, load_optimizer=load_optimizer)
 
     async def unload_slot(self, slot: int) -> None:
         await self.trainer.unload_slot(slot)
