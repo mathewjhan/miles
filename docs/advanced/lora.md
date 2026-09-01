@@ -289,13 +289,13 @@ stability evidence rather than a released benchmark.
 
 ## Multi-LoRA training
 
-The dataset-driven multi-LoRA v1 backend (fully-async driver, adapter
-controller, per-adapter data sources) has been removed. A Tinker-compatible
-multi-LoRA backend is being built in its place: clients submit explicit
-forward_backward / optim_step operations against adapter slots instead of the
-server owning datasets and schedules. The retained slot mechanics live in
-`miles/backends/megatron_utils/lora/slots.py` and
-`miles/backends/megatron_utils/lora/optimizer.py`.
+Multi-LoRA training is served through the Tinker protocol: `serve_tinker.py`
+turns a miles deployment into a training service where each client drives its
+own adapter slot with explicit forward_backward / optim_step operations (the
+server owns no datasets or schedules). The gateway lives in `miles/tinker/`,
+the slot mechanics in `miles/backends/megatron_utils/lora/`. The dataset-driven
+multi-LoRA v1 backend (fully-async driver, adapter controller, per-adapter data
+sources) has been removed.
 
 ## Compatibility and limitations
 
