@@ -404,11 +404,13 @@ class MegatronTrainRayActor(TrainRayActor):
         return Box(ray.put({key: [t.cpu() for t in tensors] for key, tensors in outputs.items()}))
 
     @with_logs
-    def load_slot(self, slot: int, rank: int, alpha: float, ckpt_path: str | None = None) -> None:
+    def load_slot(
+        self, slot: int, rank: int, alpha: float, ckpt_path: str | None = None, load_optimizer: bool = True
+    ) -> None:
         assert self.args.multi_lora, "load_slot is a multi-LoRA slot command"
         lora_executor.load_slot(self.model, self.optimizer, slot, rank, alpha)
         if ckpt_path is not None:
-            lora_checkpoint.load_slot(self.model, self.optimizer, slot, ckpt_path)
+            lora_checkpoint.load_slot(self.model, self.optimizer, slot, ckpt_path, load_optimizer)
 
     @with_logs
     def save_slot(self, slot: int, path: str) -> None:

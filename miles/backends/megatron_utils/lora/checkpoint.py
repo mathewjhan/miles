@@ -77,7 +77,7 @@ def save_slot(model: Sequence[DDP], optimizer: MegatronOptimizer, slot: int, pat
     _barrier()
 
 
-def load_slot(model: Sequence[DDP], optimizer: MegatronOptimizer, slot: int, path: str) -> None:
+def load_slot(model: Sequence[DDP], optimizer: MegatronOptimizer, slot: int, path: str, load_optimizer: bool) -> None:
     from megatron.bridge.peft.multi_lora_layers import load_adapter
 
     checkpoint_dir = Path(path)
@@ -86,8 +86,10 @@ def load_slot(model: Sequence[DDP], optimizer: MegatronOptimizer, slot: int, pat
     assert loaded > 0, f"loaded 0 adapter tensors from {checkpoint_dir / _weight_shard_name()}"
     optimizer.reload_model_params()
 
-    optim_state = torch.load(checkpoint_dir / _optim_shard_name(), map_location="cpu", weights_only=True)
-    _load_optimizer_slot_state(optimizer, slot, optim_state)
+    if load_optimizer:
+        optim_state = torch.load(checkpoint_dir / _optim_shard_name(), map_location="cpu", weights_only=True)
+        _load_optimizer_slot_state(optimizer, slot, optim_state)
+    # weights-only load keeps the fresh Adam state the slot init just zeroed
     _barrier()
 
 
