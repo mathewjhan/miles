@@ -65,7 +65,7 @@ def build_app(service: TinkerService) -> FastAPI:
 
     @app.post("/api/v1/telemetry")
     async def telemetry():
-        return {"status": "ok"}
+        return {"status": "accepted"}
 
     @app.post("/api/v1/create_session")
     async def create_session(request: Request, authorization: str | None = Header(default=None)):
