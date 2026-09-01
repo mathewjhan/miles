@@ -712,7 +712,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
     def _ensure_engines_connected(
         self, rollout_engines, snapshot_cell_id_to_hashes, engine_gpu_counts, engine_gpu_offsets
-    ) -> bool:
+    ) -> None:
         needs_reconnect = self.weight_updater.conn_status.needs_reconnect(snapshot_cell_id_to_hashes)
         if needs_reconnect:
             self.weight_updater.connect_rollout_engines(
@@ -735,6 +735,7 @@ class MegatronTrainRayActor(TrainRayActor):
     @with_logs
     def unload_adapter(self, info: "UpdatableEngines", lora_name: str) -> None:
         assert self.args.multi_lora, "unload_adapter is a multi-LoRA slot command"
+        self._heartbeat.bump()
         self._ensure_engines_connected(
             info.rollout_engines, info.snapshot_cell_id_to_hashes, info.engine_gpu_counts, info.engine_gpu_offsets
         )
