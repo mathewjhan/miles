@@ -18,9 +18,9 @@ Rollout requests then select the live named adapter with `lora_path`.
 
 Multi-LoRA currently supports disaggregated rollout only and rejects
 `--colocate` at launch. Each SGLang engine keeps the base checkpoint resident;
-miles selectively exports and NCCL-broadcasts newly loaded or optimizer-stepped
-adapters into their corresponding SGLang slots. New or restarted engines receive
-every loaded adapter, while unchanged adapters are not resent.
+adapter weights reach the engines through explicit pushes: each push registers
+an immutable version under its own engine-side name, so in-flight sampling
+against an older version is never disturbed.
 
 Model support is therefore a three-way contract rather than a hard-coded
 allowlist:
