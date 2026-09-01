@@ -5,8 +5,7 @@ arrival-order greedy: the oldest ready item goes first; a datum pulls every
 compatible ready datum (same kind / loss_fn / config) across all models into
 one WorkUnit up to the token budget — cross-tenant packing and large-request
 splitting are both just this bin-packer at datum granularity. Ready optim
-barriers of different models merge into one BarrierUnit. Fairness, priorities
-and smarter packing replace this policy without touching stream or executor.
+barriers of different models merge into one BarrierUnit.
 """
 
 from dataclasses import dataclass

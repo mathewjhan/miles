@@ -12,8 +12,7 @@ the trainer scores exactly logprob(t[i] | x[0..i]).
 
 from miles.tinker.core.types import UserInputError
 
-# SDK AdamParams schema, materialized here so core and the executor can
-# require every key (a missing key is a boundary bug, not a default)
+# materialized at the boundary so core and the executor can require every key
 ADAM_PARAM_DEFAULTS = {
     "learning_rate": 1e-4,
     "beta1": 0.9,
