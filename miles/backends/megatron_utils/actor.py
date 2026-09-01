@@ -408,12 +408,12 @@ class MegatronTrainRayActor(TrainRayActor):
         assert self.args.multi_lora, "load_slot is a multi-LoRA slot command"
         lora_executor.load_slot(self.model, self.optimizer, slot, rank, alpha)
         if ckpt_path is not None:
-            lora_checkpoint.load_slot(self.args, self.model, self.optimizer, slot, ckpt_path)
+            lora_checkpoint.load_slot(self.model, self.optimizer, slot, ckpt_path)
 
     @with_logs
     def save_slot(self, slot: int, path: str) -> None:
         assert self.args.multi_lora, "save_slot is a multi-LoRA slot command"
-        lora_checkpoint.save_slot(self.args, self.model, self.optimizer, slot, path)
+        lora_checkpoint.save_slot(self.model, self.optimizer, slot, path)
 
     @with_logs
     def unload_slot(self, slot: int) -> None:

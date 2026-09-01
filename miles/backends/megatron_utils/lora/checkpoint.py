@@ -7,7 +7,6 @@ scatters whole params across ranks; resume requires the same world topology.
 
 import os
 import shutil
-from argparse import Namespace
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -47,7 +46,7 @@ def _optim_shard_name() -> str:
     return f"optim_rank{_rank()}.pt"
 
 
-def save_slot(args: Namespace, model: Sequence[DDP], optimizer: MegatronOptimizer, slot: int, path: str) -> None:
+def save_slot(model: Sequence[DDP], optimizer: MegatronOptimizer, slot: int, path: str) -> None:
     from megatron.bridge.peft.multi_lora_layers import expose_adapter_slot
 
     is_shard_writer, _ = adapter_shard_topology()
@@ -78,7 +77,7 @@ def save_slot(args: Namespace, model: Sequence[DDP], optimizer: MegatronOptimize
     _barrier()
 
 
-def load_slot(args: Namespace, model: Sequence[DDP], optimizer: MegatronOptimizer, slot: int, path: str) -> None:
+def load_slot(model: Sequence[DDP], optimizer: MegatronOptimizer, slot: int, path: str) -> None:
     from megatron.bridge.peft.multi_lora_layers import load_adapter
 
     checkpoint_dir = Path(path)
