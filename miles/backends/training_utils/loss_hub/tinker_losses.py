@@ -77,10 +77,8 @@ def _finish(
     if per_sample_loss:
         loss = torch.stack(per_sample_loss).sum()
     else:
+        # a microbatch with no supervised tokens still needs the graph alive
         loss = logits.sum() * 0
-    # keep the graph alive for empty response regions
-    if loss.numel() == 0 or not loss.requires_grad:
-        loss = loss + 0 * logits.sum()
     _record_per_datum(batch, log_probs, per_sample_loss)
     return loss, {"loss": loss.clone().detach()}
 
