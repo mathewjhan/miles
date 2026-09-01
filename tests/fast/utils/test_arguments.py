@@ -335,6 +335,8 @@ def test_rollout_fault_tolerance_rejects_a_dedicated_eval_fleet():
 
     with pytest.raises(AssertionError, match="dedicated eval fleet"):
         miles_validate_args(args)
+
+
 class TestCriticSaveDerivation:
     def _validate(self, extra):
         parser = argparse.ArgumentParser()
