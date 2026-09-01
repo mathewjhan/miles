@@ -7,15 +7,6 @@ miles (trainer batches). Each foreign language lives only at its boundary.
 
 from dataclasses import dataclass, field
 
-COMMAND_KINDS = (
-    "forward_backward",
-    "forward_only",
-    "optim_step",
-    "save_state",
-    "load_state",
-    "save_weights_for_sampler",
-)
-
 
 class UserInputError(Exception):
     """Rejected request content; fails the promise with category User."""
@@ -34,7 +25,7 @@ class GatewayConfig:
     max_tokens_per_datum: int = 32768
     max_tokens_per_request: int = 4_000_000
     lora_alpha: float | None = None  # None: 2 * rank
-    lease_timeout_s: float = 300.0  # sessions stale beyond this lose their in-flight sampling
+    lease_timeout_s: float = 300.0  # sessions stale beyond this lose their sampling, models, and slots
     unit_token_budget: int = 262_144  # packing bound per work unit
 
 
