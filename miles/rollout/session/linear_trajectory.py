@@ -7,6 +7,7 @@ from typing import Any
 
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError, SessionNotFoundError, TokenizationError
+from miles.rollout.session.lora import SessionLoRA
 from miles.rollout.session.request_args import PreparedChatRequest, prepare_chat_request
 from miles.rollout.session.types import SessionRecord
 from miles.utils.chat_template_utils.message_matcher_hub import (
@@ -91,6 +92,7 @@ class LinearTrajectory:
     evaluation: bool = False
     sampling_defaults: dict[str, Any] = field(default_factory=dict)
     sampling_support_replay: bool = False
+    lora: SessionLoRA | None = None
 
     @property
     def turn_args(self) -> dict[str, Any]:
@@ -137,6 +139,7 @@ class LinearTrajectory:
             evaluation=self.evaluation,
             sampling_defaults=self.sampling_defaults,
             sampling_support_replay=self.sampling_support_replay,
+            lora=self.lora,
         )
         prepared.body["input_ids"] = self._render_token_ids(
             request_messages,
@@ -390,12 +393,14 @@ class SessionRegistry:
         evaluation: bool = False,
         sampling_defaults: dict[str, Any] | None = None,
         sampling_support_replay: bool = False,
+        lora: SessionLoRA | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         self.sessions[session_id] = LinearTrajectory(
             evaluation=evaluation,
             sampling_defaults=dict(sampling_defaults or {}),
             sampling_support_replay=sampling_support_replay,
+            lora=lora,
         )
         return session_id
 

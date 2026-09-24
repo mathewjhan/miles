@@ -18,6 +18,7 @@ from typing import Any
 from miles.rollout.generate_utils.sampling_mask import validate_sampling_support_request
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError
+from miles.rollout.session.lora import SessionLoRA
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizer, extract_template_args
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, lora_rollout_enabled
 
@@ -58,6 +59,7 @@ def prepare_chat_request(
     evaluation: bool = False,
     sampling_defaults: dict[str, Any] | None = None,
     sampling_support_replay: bool = False,
+    lora: SessionLoRA | None = None,
 ) -> PreparedChatRequest:
     """Resolve an owned request using server rules, session defaults, model rules, and prior turn args.
 
@@ -65,7 +67,9 @@ def prepare_chat_request(
     ``sampling_defaults`` are the session's values for sampling fields the client omits.
     Client input and recorded history remain unchanged.
     """
-    request_args, client_stream = resolve_request_args_by_config(deepcopy(client_args), config, evaluation=evaluation)
+    request_args, client_stream = resolve_request_args_by_config(
+        deepcopy(client_args), config, evaluation=evaluation, lora=lora
+    )
     apply_session_sampling_defaults(request_args, sampling_defaults or {}, evaluation=evaluation)
     try:
         request_args = tito_tokenizer.resolve_request_args(request_args, turn_args=turn_args)
@@ -111,7 +115,11 @@ def apply_session_sampling_defaults(
 
 
 def resolve_request_args_by_config(
-    request_args: dict[str, Any], config: SessionServerConfig, *, evaluation: bool = False
+    request_args: dict[str, Any],
+    config: SessionServerConfig,
+    *,
+    evaluation: bool = False,
+    lora: SessionLoRA | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Apply server constraints in place and return the same request and stream intent.
 
@@ -128,9 +136,11 @@ def resolve_request_args_by_config(
     request_args["return_routed_experts"] = not evaluation and bool(config.use_rollout_routing_replay)
     request_args["return_indexer_topk"] = not evaluation and bool(config.use_rollout_indexer_replay)
 
-    # The served adapter is selected by training; SGLang lets a ``base:adapter``
-    # model parameter beat ``lora_path``, so that spelling is refused too.
-    lora_path = LORA_ADAPTER_NAME if lora_rollout_enabled(config) else None
+    # Native training uses the shared adapter; Tinker sessions select a saved
+    # version explicitly and otherwise sample the base model.
+    lora_path = lora.name if lora is not None else None
+    if lora is None and lora_rollout_enabled(config) and not config.tinker_checkpoint_root:
+        lora_path = LORA_ADAPTER_NAME
     if (value := request_args.get("lora_path")) is not None and value != lora_path:
         raise MessageValidationError(
             f"lora_path={value!r} is not accepted: the served adapter is selected by training"
@@ -139,7 +149,8 @@ def resolve_request_args_by_config(
         request_args.pop("lora_path", None)
     else:
         request_args["lora_path"] = lora_path
-    if lora_path is not None and ":" in str(request_args.get("model") or ""):
+    # SGLang's base:adapter model spelling overrides lora_path.
+    if (lora_path is not None or config.tinker_checkpoint_root) and ":" in str(request_args.get("model") or ""):
         raise MessageValidationError(
             "model must not name a LoRA adapter; the session server serves the trained adapter"
         )

@@ -25,6 +25,7 @@ from miles.rollout.session.errors import (
     UpstreamResponseError,
 )
 from miles.rollout.session.linear_trajectory import SessionRegistry
+from miles.rollout.session.lora import SessionLoRA
 from miles.rollout.session.request_args import filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
 from miles.rollout.session.samples.merge import (
@@ -245,11 +246,16 @@ class SessionCore:
             body["session_server_instance_id"] = self.instance_id
         return Response(content=_render_json(body), status_code=200, media_type=JSON_MEDIA_TYPE)
 
-    async def create_session(self, *, evaluation: bool = False, sampling_defaults: dict | None = None) -> Response:
+    async def create_session(
+        self, *, evaluation: bool = False, sampling_defaults: dict | None = None, lora: SessionLoRA | None = None
+    ) -> Response:
+        if lora is not None:
+            await self.backend.load_lora_adapter(lora)
         session_id = self.registry.create_session(
             evaluation=evaluation,
             sampling_defaults=sampling_defaults,
             sampling_support_replay=not evaluation and self.config.use_sampling_support_replay,
+            lora=lora,
         )
         return Response(content=_render_json({"session_id": session_id}), status_code=200, media_type=JSON_MEDIA_TYPE)
 

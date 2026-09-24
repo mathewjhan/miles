@@ -28,6 +28,8 @@ class SessionServerConfig(FrozenStrictBaseModel):
     pause_generation_mode: str | None
     session_sample_picker_path: str | None
     session_sample_postprocessor_path: str | None
+    tinker_checkpoint_root: str | None
+    tinker_base_model: str | None
 
 
 def compute_session_server_config(
@@ -58,4 +60,7 @@ def compute_session_server_config(
         pause_generation_mode=getattr(args, "pause_generation_mode", None),
         session_sample_picker_path=getattr(args, "session_sample_picker_path", None),
         session_sample_postprocessor_path=getattr(args, "session_sample_postprocessor_path", None),
+        tinker_checkpoint_root=getattr(args, "tinker_checkpoint_root", None)
+        or (f"{args.save}/tinker" if hasattr(args, "tinker_server_port") and getattr(args, "save", None) else None),
+        tinker_base_model=getattr(args, "tinker_base_model", None),
     )

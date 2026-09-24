@@ -44,7 +44,9 @@ from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.core import JSON_MEDIA_TYPE, SessionCore, _render_json
 from miles.rollout.session.errors import SessionError
 from miles.rollout.session.linear_trajectory import SessionRegistry
+from miles.rollout.session.lora import request_api_key, resolve_session_lora
 from miles.rollout.session.types import CreateSessionRequest
+from miles.tinker.core.types import OwnershipError
 from miles.utils.chat_template_utils import get_tito_tokenizer
 from miles.utils.chat_template_utils.message_matcher_hub import (
     SessionMessageMatcherError,
@@ -107,9 +109,18 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
             params = CreateSessionRequest.model_validate_json(await request.body() or b"{}")
         except ValidationError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
+        lora = None
+        if params.model_path is not None:
+            try:
+                lora = resolve_session_lora(
+                    config, model_path=params.model_path, api_key=request_api_key(request.headers)
+                )
+            except OwnershipError as exc:
+                return JSONResponse(status_code=403, content={"error": str(exc)})
         return await core.create_session(
             evaluation=params.evaluation,
-            sampling_defaults=params.model_dump(exclude={"evaluation"}, exclude_none=True),
+            sampling_defaults=params.model_dump(exclude={"evaluation", "model_path"}, exclude_none=True),
+            lora=lora,
         )
 
     @app.get("/sessions/{session_id}")

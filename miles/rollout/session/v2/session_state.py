@@ -28,6 +28,7 @@ from typing import Any
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError, TokenizationError, TruncatedGenerationError
 from miles.rollout.session.linear_trajectory import SessionRegistry, assert_pretokenized_prefix
+from miles.rollout.session.lora import SessionLoRA
 from miles.rollout.session.request_args import PreparedChatRequest, prepare_chat_request
 from miles.rollout.session.types import SessionRecord
 from miles.rollout.session.v2.tree_trajectory import AttachPoint, SessionTree, TrajectoryNode
@@ -52,6 +53,7 @@ class SessionStateV2:
     evaluation: bool = False
     sampling_defaults: dict[str, Any] = field(default_factory=dict)
     sampling_support_replay: bool = False
+    lora: SessionLoRA | None = None
 
     def latest(self) -> TrajectoryNode | None:
         """The most recently committed generation (always a leaf), or ``None``
@@ -109,6 +111,7 @@ def prepare_token_ids_and_request_args(
         evaluation=state.evaluation,
         sampling_defaults=state.sampling_defaults,
         sampling_support_replay=state.sampling_support_replay,
+        lora=state.lora,
     )
     prepared.body["input_ids"] = _render_token_ids(
         parent, request_messages, template_args=prepared.template_args, tito_tokenizer=tito_tokenizer
@@ -224,12 +227,14 @@ class SessionRegistryV2(SessionRegistry):
         evaluation: bool = False,
         sampling_defaults: dict[str, Any] | None = None,
         sampling_support_replay: bool = False,
+        lora: SessionLoRA | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         self.sessions[session_id] = SessionStateV2(
             evaluation=evaluation,
             sampling_defaults=dict(sampling_defaults or {}),
             sampling_support_replay=sampling_support_replay,
+            lora=lora,
         )
         return session_id
 

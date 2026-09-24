@@ -16,6 +16,7 @@ from fastapi import FastAPI
 
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.core import ProxyRequest
+from miles.rollout.session.lora import SessionLoRA, load_session_lora
 from miles.rollout.session.sessions import setup_session_routes
 from miles.utils.logging_utils import configure_logger_raw
 from miles.utils.workers.argv_utils import parse_config_argv
@@ -72,6 +73,9 @@ class SessionServer:
             "status_code": response.status_code,
             "headers": dict(response.headers),
         }
+
+    async def load_lora_adapter(self, lora: SessionLoRA) -> None:
+        await load_session_lora(self.client, self.backend_url, lora)
 
 
 def run_session_server(config: SessionServerConfig):

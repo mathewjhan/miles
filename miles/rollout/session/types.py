@@ -1,10 +1,11 @@
-from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, field_validator
+from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, StrictStr, field_validator
 
 from miles.utils.pydantic_utils import StrictBaseModel
 
 
 class CreateSessionRequest(StrictBaseModel):
     evaluation: StrictBool = False
+    model_path: StrictStr | None = None
     # the caller resolves rollout/eval/dataset values; the session only fills fields a request omits
     temperature: StrictFloat | None = None
     top_p: StrictFloat | None = None
